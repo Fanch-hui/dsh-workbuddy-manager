@@ -9,7 +9,7 @@
 
 ## 桌面版安装与使用
 
-1. 从仓库执行 `npm pack`，在 DSH 插件页面安装生成的 `dsh-workbuddy-manager-0.4.1.tgz` 并启用，然后完全退出并重启 DSH。
+1. 从仓库执行 `npm pack`，在 DSH 插件页面安装生成的 `dsh-workbuddy-manager-0.4.2.tgz` 并启用，然后完全退出并重启 DSH。
 2. 打开 **设置 → WorkBuddy**。
 3. 在 **添加 WorkBuddy 账号** 中选择版本（国内版或国际版），点击 **获取登录链接或扫码**，通过二维码或浏览器完成授权。
 4. 授权完成后，账号令牌加密保存在 DSH 凭据服务中，宿主自动在 `127.0.0.1:随机端口` 启动本地网关并同步模型。
@@ -29,7 +29,7 @@
 
 ```sh
 npm pack
-dsh plugin --profile demo add ./dsh-workbuddy-manager-0.4.1.tgz
+dsh plugin --profile demo add ./dsh-workbuddy-manager-0.4.2.tgz
 # 发布后：dsh plugin --profile demo add dsh-workbuddy-manager
 ```
 

@@ -15,6 +15,13 @@ test('桌面宿主同步真实模型发现并保留其他路由', { skip: !runti
   const { composeEntries, loadOverlayPatches } = await load('dsh-app-boot/lib/index.js')
   const { Config, apply } = await load('dsh-llm-pi-ai/lib/index.js')
   const { SettingsForms } = await load('dsh-settings/lib/index.js')
+  const { ClientModuleRegistry } = await load('dsh-client-modules/lib/index.js')
+  const registry = Object.create(ClientModuleRegistry.prototype)
+  Object.defineProperty(registry, 'ctx', { value: { loader: {} } })
+  const client = registry.resolveMeta('dsh-workbuddy-manager', pathToFileURL(resolve(root, 'package.json')).href)
+  assert.equal(client.packageName, 'dsh-workbuddy-manager')
+  assert.equal(client.meta.clientPath, resolve(root, 'lib/ui-bundle.js'))
+  assert.ok(client.meta.inject.includes('@deepseek-ai/dsh-client-ui-settings'))
   const base = loadOverlayPatches('dsh-test', resolve(runtimeRoot, 'node_modules/@deepseek-ai/dsh-base/cordis.patch.yml'))
   const bundle = loadOverlayPatches('dsh-test', resolve(root, 'cordis.patch.yml'))
   const warnings = []

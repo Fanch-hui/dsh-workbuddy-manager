@@ -1,0 +1,2 @@
+# Unified patch context prefixes blank lines with a space.
+bridge/*.patch whitespace=-blank-at-eol,-blank-at-eof

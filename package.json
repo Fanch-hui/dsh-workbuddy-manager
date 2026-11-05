@@ -1,6 +1,6 @@
 {
   "name": "dsh-workbuddy-manager",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "接入 WorkBuddy Manager 账号池网关的 DeepSeek Harness 插件（DSH 0.2.2-rc.1）",
   "type": "module",
   "license": "MIT",
@@ -27,6 +27,10 @@
   },
   "files": [
     "lib",
+    "bridge/Dockerfile",
+    "bridge/compose.yaml",
+    "bridge/dsh_bridge.py",
+    "bridge/workbuddy-manager.patch",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"

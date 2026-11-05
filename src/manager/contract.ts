@@ -9,6 +9,7 @@ export const managerRequest = z.discriminatedUnion('action', [
   z.object({ action: z.literal('health'), address }),
   z.object({ action: z.literal('login'), address, username: z.string().trim().min(1).max(64), password: z.string().min(1).max(1024) }),
   z.object({ action: z.literal('logout'), address }),
+  z.object({ action: z.literal('bridge'), address }),
   z.object({ action: z.literal('overview'), address }),
   z.object({ action: z.literal('accountDisabled'), address, file: accountFile, disabled: z.boolean() }),
   z.object({ action: z.literal('authStart'), address, realm: z.enum(['cn', 'global']), region: z.string().max(20) }),

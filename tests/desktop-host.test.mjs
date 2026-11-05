@@ -4,6 +4,7 @@ import { createServer } from 'node:http'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { loadConnection, sync } from '../lib/ui/connection.js'
+import { connectBridge } from '../lib/ui/bridge-connection.js'
 
 const runtimeRoot = process.env.DSH_RUNTIME_ROOT
 const root = resolve(import.meta.dirname, '..')
@@ -40,7 +41,22 @@ test('桌面宿主同步真实模型发现并保留其他路由', { skip: !runti
       res.end(JSON.stringify({ ok: true, service: 'workbuddy-manager' }))
       return
     }
-    if (req.url === '/v1/models') {
+    if (req.url === '/api/login') {
+      res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': 'wb_session=fixture-session; Path=/' })
+      res.end(JSON.stringify({ ok: true, role: 'admin' }))
+      return
+    }
+    if (req.url === '/api/dsh/session') {
+      if (req.headers.cookie !== 'wb_session=fixture-session') { res.writeHead(401).end('{}'); return }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ token: 'fixture-bridge-grant' }))
+      return
+    }
+    if (req.url?.startsWith('/api/dsh/v1/') && req.headers.authorization !== 'Bearer fixture-bridge-grant') {
+      res.writeHead(401).end('{}')
+      return
+    }
+    if (req.url === '/v1/models' || req.url === '/api/dsh/v1/models') {
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ object: 'list', data: [{ id: 'glm-test', object: 'model' }] }))
       return
@@ -188,4 +204,40 @@ test('桌面宿主同步真实模型发现并保留其他路由', { skip: !runti
   const toolCall = toolChunks.find(chunk => chunk.type === 'block-end' && chunk.block?.type === 'tool-call')
   assert.equal(toolCall?.block.name, 'read_file')
   assert.deepEqual(JSON.parse(toolCall.block.arguments), { path: 'README.md' })
+
+  const { Context } = await load('cordis/lib/index.js')
+  const { ManagerRemote } = await import('../lib/manager/service.js')
+  const host = new Context()
+  const records = new Map()
+  host.provide('credentials', {
+    describe: async ref => ({ configured: credential.has(ref), writable: true }),
+    set: async (ref, value) => { credential.set(ref, value) },
+    unset: async ref => { credential.delete(ref) },
+    readRecord: async key => records.get(key),
+    modifyRecord: async (key, update) => { const value = await update(records.get(key)); records.set(key, value); return value },
+    deleteRecord: async key => { records.delete(key) },
+  })
+  const managerScope = host.plugin(ManagerRemote)
+  await managerScope
+  t.after(() => managerScope.dispose())
+  const manager = host.get('workbuddyManager')
+  await manager.manage({ action: 'login', address: baseURL, username: 'fixture', password: 'fixture-password' })
+  const bridgeRemote = { ...remote, workbuddy: { manage: async request => ok(await manager.manage(request)) } }
+  assert.equal(await connectBridge(bridgeRemote, baseURL, () => true), 1)
+  assert.ok(registration.routes.includes('workbuddy-manager-session'))
+  assert.equal(providers['workbuddy-manager'].apiKeyEnv.startsWith('WORKBUDDY_MANAGER_KEY_'), true)
+  assert.equal(JSON.stringify(providers).includes('fixture-bridge-grant'), false)
+  const bridgeChunks = []
+  for await (const chunk of registration.adapter.stream({
+    provider: 'workbuddy-manager-session', model: 'glm-test',
+    messages: [{ role: 'user', content: [{ type: 'text', text: '读取文件' }] }],
+    tools: [{ name: 'read_file', description: 'Read a file', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } }],
+  })) bridgeChunks.push(chunk)
+  const bridged = bridgeChunks.find(chunk => chunk.type === 'block-end' && chunk.block?.type === 'tool-call')
+  assert.equal(bridged?.block.name, 'read_file')
+  assert.deepEqual(JSON.parse(bridged.block.arguments), { path: 'README.md' })
+  const bridgeRequest = requests.find(request => request.path === '/api/dsh/v1/responses')
+  assert.equal(bridgeRequest?.auth, 'Bearer fixture-bridge-grant')
+  assert.equal(bridgeRequest?.body.tools[0].name, 'read_file')
+  assert.equal(requests.some(request => request.path === '/api/keys'), false)
 })

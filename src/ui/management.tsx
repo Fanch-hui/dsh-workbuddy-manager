@@ -11,7 +11,7 @@ export interface AppRemote extends Remote {
 interface Account { file: string; nickname: string; note: string; realm: string; disabled: boolean; blocked: boolean; expired: boolean; inPool: boolean; cooling: boolean; credits: number | null }
 interface Key { id: number; name: string; realm: string; enabled: boolean; quota: number | null; usedTokens: number | null; quotaCredit: number | null; usedCredit: number | null }
 interface Overview { accounts: Account[]; keys: Key[]; poolAvailable: boolean; manageable: boolean }
-interface Props { remote: AppRemote; address: string; writable: boolean; disabled: boolean; onBusyChange: (busy: boolean) => void; onKeySelected: (ref: string) => Promise<void> }
+interface Props { remote: AppRemote; address: string; writable: boolean; disabled: boolean; onBusyChange: (busy: boolean) => void; onKeySelected: (ref: string) => Promise<void>; onConnect: (address: string, active: () => boolean) => Promise<void> }
 
 function accountStatus(account: Account, poolAvailable: boolean): string {
   if (account.disabled) return '已停用'
@@ -36,7 +36,7 @@ function usage(value: number | null, quota: number | null, unit: string): string
   return `${unit} ${used} / ${limit}`
 }
 
-export function Management({ remote, address, writable, disabled, onBusyChange, onKeySelected }: Props) {
+export function Management({ remote, address, writable, disabled, onBusyChange, onKeySelected, onConnect }: Props) {
   const [online, setOnline] = useState<'unknown' | 'online' | 'offline'>('unknown')
   const [role, setRole] = useState('')
   const [loggedIn, setLoggedIn] = useState(false)
@@ -70,6 +70,7 @@ export function Management({ remote, address, writable, disabled, onBusyChange, 
   useEffect(() => {
     let active = true
     let checked = false
+    let restoredRole = ''
     setRestoring(true); setOnline('unknown'); setLoggedIn(false); setRole(''); setOverview(undefined); setQr(''); setQrStatus(''); setFailure(''); setMessage('')
     const timer = setTimeout(() => {
       void (async () => {
@@ -78,17 +79,21 @@ export function Management({ remote, address, writable, disabled, onBusyChange, 
             if (!active) return false
             checked = true
             setOnline(status.online ? 'online' : 'offline')
-            setLoggedIn(status.authenticated); setRole(status.role || '')
+            restoredRole = status.role || ''
+            setLoggedIn(status.authenticated); setRole(restoredRole)
             return true
           })
-          if (active && result !== undefined) setOverview(result as Overview)
+          if (active && result !== undefined) {
+            setOverview(result as Overview)
+            if (restoredRole === 'admin') await onConnect(address, () => active)
+          }
         } catch (error) {
           if (active) { if (!checked) setOnline('offline'); setFailure(safeMessage(error, '')) }
         } finally { if (active) setRestoring(false) }
       })()
     }, 250)
     return () => { active = false; clearTimeout(timer) }
-  }, [address, call])
+  }, [address, call, onConnect])
 
   useEffect(() => {
     if (!qr) return
@@ -99,8 +104,10 @@ export function Management({ remote, address, writable, disabled, onBusyChange, 
         const result = await call({ action: 'authPoll', address }) as { status: string }
         if (cancelled) return
         if (result.status === 'success') {
-          setQr(''); setQrStatus(''); setMessage('账号授权成功，正在更新账号列表。')
+          setQrStatus('账号授权成功，正在连接模型…')
           await refresh()
+          if (!cancelled) await onConnect(address, () => !cancelled)
+          if (!cancelled) { setQr(''); setQrStatus(''); setMessage('账号授权成功。') }
           return
         }
         if (result.status === 'expired' || result.status === 'invalid') {
@@ -115,7 +122,7 @@ export function Management({ remote, address, writable, disabled, onBusyChange, 
     }
     timer = setTimeout(() => void poll(), 3000)
     return () => { cancelled = true; clearTimeout(timer) }
-  }, [address, call, qr, refresh])
+  }, [address, call, qr, refresh, onConnect])
 
   const run = async (operation: () => Promise<void>, secret = '') => {
     setBusy(true); onBusyChange(true); setFailure(''); setMessage('')
@@ -129,7 +136,10 @@ export function Management({ remote, address, writable, disabled, onBusyChange, 
     catch (error) { setOnline('offline'); throw error }
     setOnline(status.online ? 'online' : 'offline')
     setLoggedIn(status.authenticated); setRole(status.role || '')
-    if (status.authenticated) await refresh()
+    if (status.authenticated) {
+      await refresh()
+      if (status.role === 'admin') await onConnect(address, () => true)
+    }
   })
 
   const login = (event: FormEvent) => {
@@ -140,6 +150,7 @@ export function Management({ remote, address, writable, disabled, onBusyChange, 
       const result = await call({ action: 'login', address, username, password: secret }) as { role: string }
       setOnline('online'); setLoggedIn(true); setRole(result.role)
       await refresh()
+      if (result.role === 'admin') await onConnect(address, () => true)
     }, secret)
   }
 
@@ -208,9 +219,10 @@ export function Management({ remote, address, writable, disabled, onBusyChange, 
       {!loggedIn && !restoring && <form onSubmit={login}>
         <label htmlFor="workbuddy-manager-user">管理用户名<input id="workbuddy-manager-user" autoComplete="username" value={username} required disabled={blocked} onChange={event => setUsername(event.target.value)} /></label>
         <label htmlFor="workbuddy-manager-password">管理密码<input id="workbuddy-manager-password" type="password" autoComplete="current-password" value={password} required disabled={blocked} onChange={event => setPassword(event.target.value)} /></label>
-        <p className="wb-muted">登录会话保存在 DSH 凭据存储中；会话失效后需要重新登录。</p>
+        <p className="wb-muted">管理员登录后会自动连接模型；登录会话保存在 DSH 凭据存储中。</p>
         <div className="wb-actions"><button type="submit" disabled={blocked}>登录管理服务</button></div>
       </form>}
+      {loggedIn && role !== 'admin' && <p className="wb-muted">账号池模型连接需要管理员登录。</p>}
       {failure && <p className="wb-error" role="alert">{failure}</p>}
       {message && <p className="wb-success" role="status">{message}</p>}
     </section>

@@ -5,24 +5,44 @@
 ## 环境
 
 - DSH `0.2.2-rc.1`；插件的 `engines.dsh` 为 `>=0.2.2-rc.1 <0.3.0`。DSH 宿主要求 Node ≥24.9。
-- 已部署并启动 [WorkBuddy Manager](https://github.com/ithtelab/workbuddy-manager)，默认管理地址为 `http://127.0.0.1:7864`。
-- WorkBuddy Manager 的管理账号；可以在插件内创建网关密钥并添加账号。
+- 已部署并启动 [WorkBuddy Manager](https://github.com/ithtelab/workbuddy-manager) `2.11.10`；账号池直连使用本项目提供的桥接镜像，默认管理地址为 `http://127.0.0.1:7864`。
+- WorkBuddy Manager 管理员账号；可在插件内扫码添加账号。
 
 ## 桌面版安装
 
-1. 从仓库执行 `npm pack`，生成 `dsh-workbuddy-manager-0.3.2.tgz`；发布后也可直接安装对应包名。
-2. 在 DSH 插件页面添加安装包，确认插件已启用，重启 DSH。
-3. 打开 **设置 → WorkBuddy**。本机网关可填写 `http://127.0.0.1:7864`，插件自动补全 `/v1`；远程网关使用 HTTPS。
-4. 在**管理服务**中使用管理用户名和密码登录。管理员可查看和启停账号、扫码添加账号、查看及启停网关密钥；新建密钥默认不限额度，创建时需要确认。
-5. 在网关密钥列表中点击**用于 DSH**，插件会保存凭据并同步模型。也可手动输入密钥后点击**保存并同步模型**。在对话模型选择器选择 WorkBuddy Manager 的模型。
+1. 按下方说明构建并启用 WorkBuddy Manager 桥接镜像。
+2. 从仓库执行 `npm pack`，在 DSH 插件页面安装生成的 `dsh-workbuddy-manager-0.4.0.tgz` 并启用，然后完全退出并重启 DSH。
+3. 打开 **设置 → WorkBuddy**。本机填写 `http://127.0.0.1:7864`；远程服务使用 HTTPS。
+4. 使用管理用户名和密码登录。插件自动连接账号池并同步模型；尚无账号时，在账号管理中扫码添加。
+5. 在对话模型选择器选择 **WorkBuddy 账号池**下的模型。已有网关密钥仍可在设置中选择或输入。
 
 从 `0.1.0` 升级时，如果路由仅来自旧版 bundle，插件会识别已保存的默认凭据；点击**保存并同步模型**即可恢复连接。已有 WorkBuddy 提供方会读取并保留其模型和高级设置；有多个候选时先选择目标。其他提供方无需迁移。
 
+## 账号池桥接部署
+
+在项目目录构建基于官方 `2.11.10` 镜像的桥接镜像：
+
+```sh
+docker build -t dsh-workbuddy-bridge:2.11.10 -f bridge/Dockerfile bridge
+```
+
+对于 Compose 部署，确认原项目名称、Compose 文件和管理服务名后，将它们分别填入 `PROJECT`、`COMPOSE_FILE`；提供的叠加文件针对服务名 `manager`：
+
+```sh
+docker compose -p "$PROJECT" -f "$COMPOSE_FILE" -f bridge/compose.yaml up -d --no-deps --no-build manager
+```
+
+该操作只重建管理服务，原账号池容器、配置和数据卷继续使用。服务名不同时，先修改叠加文件中的服务名。恢复官方镜像时使用相同项目名和原 Compose 文件，执行 `docker compose -p "$PROJECT" -f "$COMPOSE_FILE" up -d --no-deps --no-build manager`。
+
+桥接镜像固定适配 `2.11.10`；升级上游时需要重新核对并测试补丁。桥接模型调用使用默认上游，走管理员会话授权，按服务安全设置执行全局 IP 规则和限流；网关密钥的额度、模型及上游分组限制不作用于这条连接。请求会消耗账号积分并记录请求日志。
+
 ## 模型与凭据
 
-插件复用 DSH 自带的 `llm-pi-ai` 和 `openai-responses` 协议，通过设置服务的字段级操作更新 `workbuddy-manager`。已有提供方的 headers、兼容选项和模型设置会保留；不更换密钥时沿用已有引用，其他提供方不会被替换。模型同步只追加新发现的模型，不覆盖或删除已有模型；需要手动调整模型详情时，使用 DSH 原有模型设置。
+插件复用 DSH 自带的 `llm-pi-ai` 和 `openai-responses` 协议，为账号池桥接创建独立提供方，保留其他提供方和旧网关连接。模型同步只追加新发现的模型，不覆盖或删除已有模型。
 
-网关密钥经 DSH 凭据服务保存，配置只记录引用名。留空时沿用已有的 `apiKeyEnv`；输入新密钥或从管理界面选择密钥时，使用新的插件专属凭据引用，不覆盖其他提供方可能共享的凭据。首次创建提供方可在管理区选择密钥，或手动输入密钥后同步。管理登录会话保存在 DSH 凭据服务中，按网关地址隔离；不会保存管理密码。打开设置时会自动恢复登录，退出管理或会话失效时清除保存的会话。
+管理登录会话和仅限模型调用的桥接会话按地址保存在 DSH 凭据服务中，模型配置只记录凭据引用，不保存管理密码。模型请求期间插件会续用桥接会话；退出管理时清除本机保存的会话。管理账号降权、删除或会话吊销后，桥接会话也会失效。
+
+旧网关密钥连接仍按原方式工作：留空时复用已有 `apiKeyEnv`；输入或选择密钥时使用插件专属凭据引用，避免覆盖其他提供方共享的凭据。
 
 插件管理已部署的网关连接；容器或进程仍由 Docker Desktop、Compose 或部署环境的服务管理器启停。
 
@@ -30,7 +50,7 @@
 
 ```sh
 npm pack
-dsh plugin --profile demo add ./dsh-workbuddy-manager-0.3.2.tgz
+dsh plugin --profile demo add ./dsh-workbuddy-manager-0.4.0.tgz
 # 发布后：dsh plugin --profile demo add dsh-workbuddy-manager
 ```
 
@@ -44,8 +64,9 @@ dsh plugin --profile demo add ./dsh-workbuddy-manager-0.3.2.tgz
 | `npm pack` 报 `EPERM`（npm 缓存含 root 文件） | 临时用 `npm_config_cache="$(mktemp -d)" npm pack`；长期按报错中的目录执行 `sudo chown -R "$(id -u):$(id -g)" <缓存目录>`。 |
 | `ERR_PNPM_UNEXPECTED_STORE` | 将该 profile 的 `pnpm-workspace.yaml` 的 `storeDir` 设为报错中原 store 的父目录，保留现有配置，再重试。pnpm 11 会自行追加 `v11`。 |
 | 设置中没有 WorkBuddy | 确认插件已安装并启用，重启 DSH 后再打开设置。 |
-| 网关连接失败或 HTTP 401 | 检查服务是否启动、地址是否正确，以及密钥是否有效并允许相应模型。 |
-| 没有发现模型 | 检查网关密钥的模型权限以及国内版／国际版权限。 |
+| 提示账号池服务尚未启用 DSH 桥接 | 构建并启用桥接镜像，确认地址指向该服务。 |
+| 桥接连接失败或 HTTP 401 | 检查服务地址并重新登录管理员账号；旧网关连接还需检查密钥及模型权限。 |
+| 没有发现模型 | 检查默认账号池是否有可用账号，以及对应国内版／国际版模型。 |
 | 配置发生冲突 | 点击 **重新载入**，检查当前设置后重新同步。 |
 | 模型配置更新但密钥保存失败 | 检查 DSH 凭据存储是否可写，重新载入页面后重试。 |
 

@@ -15,3 +15,14 @@ export function normalizeURL(input: string): string {
 export function managementURL(input: string): string {
   return normalizeURL(input).replace(/\/v1$/, '')
 }
+
+export const BRIDGE_PROVIDER = 'workbuddy-manager-session'
+
+export function bridgeURL(input: string): string {
+  return `${managementURL(input)}/api/dsh/v1`
+}
+
+export function bridgeManagementURL(input: string): string | undefined {
+  const url = normalizeURL(input)
+  return url.endsWith('/api/dsh/v1') ? url.slice(0, -'/api/dsh/v1'.length) : undefined
+}

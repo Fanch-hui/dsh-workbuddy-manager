@@ -1,12 +1,18 @@
+import { createHash } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { Remote, RemoteError, TypertRemoteService, principalOf } from '@deepseek-ai/dsh-typert-protocol'
-import { managementURL } from '../address.js'
+import { BRIDGE_PROVIDER, bridgeManagementURL, managementURL } from '../address.js'
 import { managerRequest, type ManagerRequest } from './contract.js'
 import { SessionStore, validSession, type SessionCredentials } from './session-store.js'
 
 type Dict = Record<string, unknown>
-type CredentialSink = { describe(ref: string): Promise<{ configured: boolean; writable: boolean }>; set(ref: string, value: string): Promise<void> }
+type CredentialSink = { describe(ref: string): Promise<{ configured: boolean; writable: boolean }>; set(ref: string, value: string): Promise<void>; unset?(ref: string): Promise<void> }
 const MAX_REPLY = 2 * 1024 * 1024
+
+function bridgeRef(base: string): string {
+  const digest = createHash('sha256').update(base).digest('hex').slice(0, 32).toUpperCase()
+  return `WORKBUDDY_MANAGER_BRIDGE_${digest}`
+}
 
 function object(value: unknown): Dict {
   return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Dict : {}
@@ -25,8 +31,24 @@ export class ManagerRemote extends TypertRemoteService {
   private readonly operations = new Map<string, Promise<void>>()
   private readonly sessionStore = new SessionStore(() => this.ctx.get('credentials' as never) as unknown as SessionCredentials | undefined)
   private readonly pending = new Map<string, { state: string; realm: string; region: string }>()
+  private readonly renewalDue = new Map<string, number>()
 
-  constructor(ctx: Context) { super(ctx, 'workbuddyManager', { namespace: 'workbuddy' }) }
+  constructor(ctx: Context) {
+    super(ctx, 'workbuddyManager', { namespace: 'workbuddy' })
+    const events = ctx as unknown as { on(name: string, listener: (request: { provider: string; baseURL: string }, headers: Headers, next: () => Headers) => Headers): void }
+    events.on('llm-pi-ai/request-headers', (request, _headers, next) => {
+      const headers = next()
+      if (request.provider !== BRIDGE_PROVIDER) return headers
+      let base: string | undefined
+      try { base = bridgeManagementURL(request.baseURL) } catch { return headers }
+      if (!base || (this.renewalDue.get(base) ?? 0) > Date.now()) return headers
+      this.renewalDue.set(base, Date.now() + 60_000)
+      void this.serialized(base, () => this.issueBridge(base!)).catch(() => {
+        console.warn('WorkBuddy 桥接会话续期失败，请检查管理登录状态。')
+      })
+      return headers
+    })
+  }
 
   @Remote
   async manage(input: ManagerRequest): Promise<unknown> {
@@ -36,9 +58,12 @@ export class ManagerRemote extends TypertRemoteService {
     if (!request.success) fail('管理请求格式无效。')
     let base: string
     try { base = managementURL(request.data.address) } catch { fail('管理服务地址无效。') }
-    // A prior renewal must settle before logout removes the stored session.
+    return this.serialized(base, () => this.dispatch(base, request.data))
+  }
+
+  private async serialized<T>(base: string, run: () => Promise<T>): Promise<T> {
     const previous = this.operations.get(base) ?? Promise.resolve()
-    const operation = previous.then(() => this.dispatch(base, request.data))
+    const operation = previous.then(run)
     const settled = operation.then(() => undefined, () => undefined)
     this.operations.set(base, settled)
     try { return await operation } finally { if (this.operations.get(base) === settled) this.operations.delete(base) }
@@ -49,6 +74,7 @@ export class ManagerRemote extends TypertRemoteService {
       case 'health': return this.health(base)
       case 'login': return this.login(base, request.username, request.password)
       case 'logout': return this.logout(base)
+      case 'bridge': return this.issueBridge(base)
       case 'overview': return this.overview(base)
       case 'accountDisabled':
         await this.request(base, `/api/accounts/${encodeURIComponent(request.file)}/disabled`, 'POST', { disabled: request.disabled })
@@ -98,10 +124,34 @@ export class ManagerRemote extends TypertRemoteService {
     return { ok: true, role: text(reply.role) }
   }
 
+  private async clearSession(base: string): Promise<void> {
+    this.sessions.delete(base); this.pending.delete(base); this.renewalDue.delete(base)
+    const credentials = this.ctx.get('credentials' as never) as unknown as CredentialSink | undefined
+    const cleanups = [this.sessionStore.clear(base)]
+    if (credentials?.unset) cleanups.push(credentials.unset(bridgeRef(base)))
+    const results = await Promise.allSettled(cleanups)
+    if (results.some(result => result.status === 'rejected')) fail('无法清除本机保存的会话，请检查 DSH 凭据存储。')
+  }
+
   private async logout(base: string): Promise<unknown> {
     try { if (await this.savedSession(base)) await this.request(base, '/api/logout', 'POST') }
-    finally { this.sessions.delete(base); this.pending.delete(base); await this.sessionStore.clear(base) }
+    finally { await this.clearSession(base) }
     return { ok: true }
+  }
+
+  private async issueBridge(base: string): Promise<{ ref: string }> {
+    const credentials = this.ctx.get('credentials' as never) as unknown as CredentialSink | undefined
+    if (!credentials?.describe || !credentials.set) fail('DSH 凭据存储不可用。')
+    const ref = bridgeRef(base)
+    let status: { writable: boolean }
+    try { status = await credentials.describe(ref) } catch { fail('DSH 凭据存储不可用。') }
+    if (!status.writable) fail('DSH 凭据存储不可写。')
+    const reply = object(await this.request(base, '/api/dsh/session', 'POST', {}))
+    const token = text(reply.token)
+    if (!/^[\x21-\x7e]{1,8192}$/.test(token)) fail('管理服务返回的桥接会话无效。')
+    try { await credentials.set(ref, token) } catch { fail('无法保存桥接会话。') }
+    this.renewalDue.set(base, Date.now() + 60_000)
+    return { ref }
   }
 
   private async overview(base: string): Promise<unknown> {
@@ -174,8 +224,7 @@ export class ManagerRemote extends TypertRemoteService {
     } catch { fail('无法连接 WorkBuddy 管理服务，请检查服务状态和地址。') }
     if (response.status === 401) {
       if (!authenticated) fail('用户名或密码不正确。')
-      this.sessions.delete(base)
-      await this.sessionStore.clear(base)
+      await this.clearSession(base)
       throw new SessionExpiredError()
     }
     if (response.ok && (authenticated || path === '/api/login')) for (const cookie of response.headers.getSetCookie()) {
@@ -186,6 +235,7 @@ export class ManagerRemote extends TypertRemoteService {
         try { await this.sessionStore.save(base, next) } catch { fail('操作已完成，但无法保存更新后的管理会话。') }
       }
     }
+    if (response.status === 404 && path === '/api/dsh/session') fail('账号池服务尚未启用 DSH 桥接，请先升级桥接服务。')
     if (response.status === 429) fail('登录尝试过多，请稍后再试。')
     if (response.status === 409 && path.endsWith('/reveal')) fail('旧密钥无法取回，请创建新的网关密钥。')
     if (response.status === 409) fail('管理服务无法完成该操作，请检查目标状态。')

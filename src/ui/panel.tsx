@@ -1,5 +1,7 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react'
-import { attachCredential, DEFAULT_URL, discardUnusedCredential, discover, loadConnection, normalizeURL, safeMessage, sync, type Connection } from './connection.js'
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import { BRIDGE_PROVIDER, bridgeManagementURL, bridgeURL, managementURL } from '../address.js'
+import { connectBridge } from './bridge-connection.js'
+import { attachCredential, DEFAULT_URL, discardUnusedCredential, discover, loadConnection, normalizeURL, PROVIDER, safeMessage, sync, type Connection } from './connection.js'
 import { Management, type AppRemote } from './management.js'
 
 const css = `
@@ -35,11 +37,23 @@ function installStyles() {
   document.head.appendChild(style)
 }
 
+function displayAddress(url: string, bridge = false): string {
+  return `${bridge ? bridgeManagementURL(url) ?? managementURL(url) : managementURL(url)}/v1`
+}
+
+export function targetURL(connection: Connection, address: string): string {
+  if (connection.providerId !== BRIDGE_PROVIDER) return normalizeURL(address)
+  if (bridgeManagementURL(connection.url) !== managementURL(address)) throw new Error('请先登录新的账号池地址，再连接模型。')
+  return bridgeURL(address)
+}
+
 interface Props { remote: AppRemote }
 export function WorkbuddyPanel({ remote }: Props) {
   const [connection, setConnection] = useState<Connection>()
   const [address, setAddress] = useState(DEFAULT_URL)
   const [managementAddress, setManagementAddress] = useState(DEFAULT_URL)
+  const addressRef = useRef(address)
+  addressRef.current = address
   const [key, setKey] = useState('')
   const [busy, setBusy] = useState(true)
   const [managementBusy, setManagementBusy] = useState(false)
@@ -53,8 +67,8 @@ export function WorkbuddyPanel({ remote }: Props) {
     try {
       const current = await loadConnection(remote, selectedId)
       setConnection(current)
-      setAddress(current.url)
-      setManagementAddress(current.url)
+      setAddress(displayAddress(current.url, current.providerId === BRIDGE_PROVIDER))
+      setManagementAddress(displayAddress(current.url, current.providerId === BRIDGE_PROVIDER))
       if (selectedId) setKey('')
       if (current.existing && current.keyConfigured) {
         setStatus('正在检查连接…')
@@ -80,16 +94,35 @@ export function WorkbuddyPanel({ remote }: Props) {
   /** The management page follows a settled address, not each keystroke of the draft. */
   useEffect(() => {
     const timer = setTimeout(() => {
-      try { setManagementAddress(normalizeURL(address)) } catch { /* Keep the last valid address while typing. */ }
+      try { setManagementAddress(displayAddress(address)) } catch { /* Keep the last valid address while typing. */ }
     }, 400)
     return () => clearTimeout(timer)
   }, [address])
+
+  const autoConnect = useCallback(async (target: string, active: () => boolean) => {
+    const current = () => {
+      try { return active() && displayAddress(addressRef.current) === displayAddress(target) } catch { return false }
+    }
+    if (!current()) return
+    setBusy(true); setFailure(''); setMessage(''); setStatus('正在连接账号池并同步模型…')
+    try {
+      const count = await connectBridge(remote, target, current)
+      if (count === undefined || !current()) return
+      const updated = await loadConnection(remote, BRIDGE_PROVIDER)
+      if (!current()) return
+      setConnection(updated)
+      setStatus(`已连接 · 已同步 ${count} 个模型`)
+      setMessage('账号池已连接，现在可在对话中选择模型。')
+    } catch (error) {
+      if (current()) { setStatus('账号池连接未完成'); setFailure(safeMessage(error, '')) }
+    } finally { setBusy(false) }
+  }, [remote])
 
   const check = async () => {
     if (!connection) return
     setBusy(true); setFailure(''); setMessage(''); setStatus('正在检查连接…')
     try {
-      const models = await discover(remote, connection, address, key)
+      const models = await discover(remote, connection, targetURL(connection, address), key)
       setStatus(`已连接 · ${models.length} 个可用模型`)
       setMessage('网关连接正常。点击“保存并同步模型”将模型加入 DSH。')
     } catch (error) {
@@ -103,12 +136,12 @@ export function WorkbuddyPanel({ remote }: Props) {
     if (!connection) return
     setBusy(true); setFailure(''); setMessage(''); setStatus('正在同步模型…')
     try {
-      const count = await sync(remote, connection, address, key)
+      const count = await sync(remote, connection, targetURL(connection, address), key)
       setKey('')
       const current = await loadConnection(remote, connection.providerId)
       setConnection(current)
-      setAddress(current.url)
-      setManagementAddress(current.url)
+      setAddress(displayAddress(current.url, current.providerId === BRIDGE_PROVIDER))
+      setManagementAddress(displayAddress(current.url, current.providerId === BRIDGE_PROVIDER))
       setStatus(`已连接 · 已同步 ${count} 个模型`)
       setMessage('保存成功。现在可以在对话的模型选择器中选择 WorkBuddy Manager。')
     } catch (error) {
@@ -118,20 +151,23 @@ export function WorkbuddyPanel({ remote }: Props) {
   }
 
   const useManagedKey = async (ref: string) => {
+    let targetId = connection?.providerId
     try {
       if (!connection) throw new Error('模型连接尚未载入。')
-      const current = await attachCredential(remote, connection, address, ref)
+      const target = connection.providerId === BRIDGE_PROVIDER ? await loadConnection(remote, PROVIDER) : connection
+      targetId = target.providerId
+      const current = await attachCredential(remote, target, displayAddress(address), ref)
       setConnection(current)
-      const count = await sync(remote, current, address, '')
+      const count = await sync(remote, current, displayAddress(address), '')
       const updated = await loadConnection(remote, current.providerId)
       setConnection(updated)
-      setAddress(updated.url)
-      setManagementAddress(updated.url)
+      setAddress(displayAddress(updated.url))
+      setManagementAddress(displayAddress(updated.url))
       setStatus(`已连接 · 已同步 ${count} 个模型`)
     } catch (error) {
       // The live provider config decides whether the key is in use; keep it when the check itself fails.
       let bound = true
-      try { bound = (await loadConnection(remote, connection?.providerId)).keyRef === ref }
+      try { bound = (await loadConnection(remote, targetId)).keyRef === ref }
       catch { /* Leave the key alone rather than delete an active reference. */ }
       setStatus(bound ? '密钥已绑定，模型同步未完成' : '密钥绑定未完成')
       const hint = bound ? '' : await discardUnusedCredential(remote, ref)
@@ -156,13 +192,15 @@ export function WorkbuddyPanel({ remote }: Props) {
         </select>
       </label>}
       <label htmlFor="workbuddy-address">网关地址
-        <input id="workbuddy-address" type="url" required value={address} disabled={busy || managementBusy || !connection?.providerId} onChange={event => setAddress(event.target.value)} aria-describedby="workbuddy-address-hint" />
+        <input id="workbuddy-address" type="url" required value={address} disabled={busy || managementBusy} onChange={event => setAddress(event.target.value)} aria-describedby="workbuddy-address-hint" />
       </label>
       <p className="wb-muted" id="workbuddy-address-hint">本机默认端口为 7864；其他机器请使用 HTTPS。</p>
-      <label htmlFor="workbuddy-key">网关密钥
-        <input id="workbuddy-key" type="password" autoComplete="off" value={key} disabled={busy || managementBusy || !connection?.providerId} onChange={event => setKey(event.target.value)} placeholder={connection?.keyConfigured ? '已保存；留空使用现有密钥' : '手动输入网关密钥，或在下方选择已有密钥'} aria-describedby="workbuddy-key-hint" />
-      </label>
-      <p className="wb-muted" id="workbuddy-key-hint">{connection?.keyConfigured ? '密钥已存入 DSH 凭据库，不会显示原文。' : '密钥将保存在 DSH 凭据库中。'}</p>
+      {connection?.providerId !== BRIDGE_PROVIDER && <details className="wb-details"><summary>使用已有网关密钥</summary><div className="wb-detail-body">
+        <label htmlFor="workbuddy-key">网关密钥
+          <input id="workbuddy-key" type="password" autoComplete="off" value={key} disabled={busy || managementBusy || !connection?.providerId} onChange={event => setKey(event.target.value)} placeholder={connection?.keyConfigured ? '已保存；留空使用现有密钥' : '输入已有网关密钥'} aria-describedby="workbuddy-key-hint" />
+        </label>
+        <p className="wb-muted" id="workbuddy-key-hint">密钥保存在 DSH 凭据库中。</p>
+      </div></details>}
       {!connection?.writable && connection && <p className="wb-error">当前 DSH 配置不可写，无法同步模型。</p>}
       <div className="wb-actions">
         <button type="submit" disabled={busy || managementBusy || !connection?.providerId || !connection.writable}>保存并同步模型</button>
@@ -171,7 +209,7 @@ export function WorkbuddyPanel({ remote }: Props) {
       </div>
     </form>
     </details>
-    {connection && <Management remote={remote} address={managementAddress} disabled={busy} writable={connection.writable && connection.keyWritable && Boolean(connection.providerId)} onBusyChange={setManagementBusy} onKeySelected={useManagedKey} />}
+    {connection && <Management remote={remote} address={managementAddress} disabled={busy} writable={connection.writable && connection.keyWritable && Boolean(connection.providerId)} onBusyChange={setManagementBusy} onKeySelected={useManagedKey} onConnect={autoConnect} />}
     {connection && connection.models.length > 0 && <div className="wb-card">
       <strong>已配置模型 · {connection.models.length}</strong>
       <ul>{connection.models.map(model => <li key={model.id}>{model.name || model.id}</li>)}</ul>

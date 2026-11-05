@@ -1,0 +1,3 @@
+services:
+  manager:
+    image: dsh-workbuddy-bridge:2.11.10

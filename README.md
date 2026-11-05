@@ -10,7 +10,20 @@
 - DSH 尚无 stable 版，`npm latest` 目前滞后在 `0.2.1-rc.5`，请使用 `npx @deepseek-ai/dsh@0.2.2-rc.1` 或 `@next`；DSH 宿主要求 Node ≥24.9。
 - 模型请求走 DSH 官方 `@deepseek-ai/dsh-llm-pi-ai` 适配器，协议选 `openai-responses`（上游文档明确：只发该协议的客户端需要单独建一个提供方）。
 
-## 开始使用
+## 桌面版接入
+
+先启动 WorkBuddy Manager 并创建网关密钥。在 DSH 桌面版打开**设置 → 模型 → 添加自定义提供方**，填写：
+
+- Provider ID：`workbuddy-manager`；显示名称：`WorkBuddy Manager`
+- 基础 URL：`http://127.0.0.1:7864/v1`（服务在其他机器时填写对应地址）
+- API 协议：`openai-responses`；API 密钥：在 WorkBuddy Manager 面板创建的网关密钥
+- 模型：选择「获取可用模型」或手动填写网关允许的模型，例如 `glm-5.2`
+
+保存后即可在模型选择器中选择该提供方。这种方式沿用桌面版已有模型配置，适合已配置其他提供方的用户。
+
+## Bundle 安装
+
+桌面版可在侧栏选择**插件 → 添加插件**，输入本地安装包的绝对路径并启用。若你的 profile 已配置 `llm-pi-ai`，请按下方「配置与边界」的说明合并 provider，或使用上面的桌面版模型设置。
 
 1. **准备服务端**：按上游文档部署 WorkBuddy Manager（默认 `http://127.0.0.1:7864`），在「密钥」页创建一把网关密钥 `wbk_...`，并记录它允许调用的模型。
 2. **写入密钥**：把密钥放到 DSH 凭据里，配置层只引用变量名，不含任何明文：
@@ -29,7 +42,7 @@
    ```
 4. **验证**：`dsh --profile demo` 启动后，在模型选择器里选 `WorkBuddy Manager / glm-5.2`；或用 CLI 体检：
    ```sh
-   WORKBUDDY_MANAGER_API_KEY=wbk_xxxxxxxx npx dsh-workbuddy doctor
+   WORKBUDDY_MANAGER_API_KEY=wbk_xxxxxxxx node ./lib/cli.js doctor
    ```
 
 ## 只读 CLI

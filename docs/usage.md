@@ -25,6 +25,14 @@ DSH 目前**没有 stable 版**：`npm latest` 仍指向 `0.2.1-rc.5`，`next` �
 
 ## 3. 安装
 
+### 桌面版：直接添加模型提供方
+
+在 WorkBuddy Manager 启动、网关密钥创建完成后，打开 DSH 桌面版的「设置 → 模型 → 添加自定义提供方」，设置 Provider ID `workbuddy-manager`、API 协议 `openai-responses`、基础 URL `http://127.0.0.1:7864/v1`（或你的网关地址），并在界面中填写网关密钥。选择「获取可用模型」或手动添加模型，保存后在模型选择器中选择。
+
+此方式直接使用 DSH 自带的模型提供方功能，与现有提供方共存；下方的 bundle 安装适合需要以配置包管理路由的场景。
+
+### 安装 bundle
+
 ```sh
 # 本地打包（推荐，产物已构建，安装时无需执行脚本）
 npm pack
@@ -171,5 +179,16 @@ npm run build         # 输出 lib/
 npm run check:package # 校验 bundle 配置与构建产物
 npm pack --dry-run    # 检查最终发布内容
 ```
+
+macOS 桌面版宿主集成测试（使用桌面应用内置运行时，向本地测试服务器发送模拟流式请求）：
+
+```sh
+ELECTRON_RUN_AS_NODE=1 \
+DSH_RUNTIME_ROOT="/Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh" \
+"/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness" \
+  --test tests/desktop-host.test.mjs
+```
+
+普通 `npm test` 在未设置 `DSH_RUNTIME_ROOT` 时跳过该宿主集成测试；通过桌面运行时执行时请使用与目标桌面版相同的版本。
 
 升级 DSH 时的检查清单：① `npm view @deepseek-ai/dsh dist-tags --json` 确认新版；② 读官方 Release Notes 的 breaking changes；③ 用 `npm pack @deepseek-ai/dsh-llm-pi-ai@<版本>` 复核 `PiAiProviderProfile` 字段；④ 更新 `engines.dsh` 与 `scripts/check-package.mjs` 的版本断言；⑤ 重跑上面的验证命令。

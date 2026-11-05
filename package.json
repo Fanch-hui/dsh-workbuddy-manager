@@ -37,7 +37,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "tsc -p tsconfig.build.json",
+    "build": "node scripts/clean-build.mjs && tsc -p tsconfig.build.json",
     "test": "npm run build && node --import tsx --test tests/*.test.ts tests/*.test.mjs",
     "check:package": "node scripts/check-package.mjs",
     "prepare": "npm run build",

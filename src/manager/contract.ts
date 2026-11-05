@@ -1,23 +1,17 @@
 import { createTypertRemoteInfo } from '@deepseek-ai/dsh-typert-protocol/remote-info'
 import { z } from 'zod'
 
-const address = z.string().min(1).max(2048)
-const accountFile = z.string().regex(/^workbuddy[0-9A-Za-z_-]{0,80}\.json(?:\.disabled)?$/)
-const keyId = z.number().int().positive().safe()
+const accountFile = z.string().regex(/^workbuddy-[0-9A-Za-z_.-]{1,120}\.json$/)
 
 export const managerRequest = z.discriminatedUnion('action', [
-  z.object({ action: z.literal('health'), address }),
-  z.object({ action: z.literal('login'), address, username: z.string().trim().min(1).max(64), password: z.string().min(1).max(1024) }),
-  z.object({ action: z.literal('logout'), address }),
-  z.object({ action: z.literal('bridge'), address }),
-  z.object({ action: z.literal('overview'), address }),
-  z.object({ action: z.literal('accountDisabled'), address, file: accountFile, disabled: z.boolean() }),
-  z.object({ action: z.literal('authStart'), address, realm: z.enum(['cn', 'global']), region: z.string().max(20) }),
-  z.object({ action: z.literal('authPoll'), address }),
-  z.object({ action: z.literal('createKey'), address, name: z.string().trim().min(1).max(64), realm: z.enum(['', 'cn', 'global']).optional() }),
-  z.object({ action: z.literal('keyEnabled'), address, id: keyId, enabled: z.boolean() }),
-  z.object({ action: z.literal('renameKey'), address, id: keyId, name: z.string().trim().min(1).max(64) }),
-  z.object({ action: z.literal('useKey'), address, id: keyId, ref: z.string().regex(/^WORKBUDDY_MANAGER_KEY_[A-F0-9]{32}$/) }),
+  z.object({ action: z.literal('health') }),
+  z.object({ action: z.literal('overview') }),
+  z.object({ action: z.literal('bridge') }),
+  z.object({ action: z.literal('authStart'), realm: z.enum(['cn', 'global']) }),
+  z.object({ action: z.literal('authPoll') }),
+  z.object({ action: z.literal('accountDisabled'), file: accountFile, disabled: z.boolean() }),
+  z.object({ action: z.literal('accountDelete'), file: accountFile }),
+  z.object({ action: z.literal('accountRefresh'), file: accountFile.optional() }),
 ])
 export type ManagerRequest = z.infer<typeof managerRequest>
 

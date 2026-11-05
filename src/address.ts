@@ -18,11 +18,4 @@ export function managementURL(input: string): string {
 
 export const BRIDGE_PROVIDER = 'workbuddy-manager-session'
 
-export function bridgeURL(input: string): string {
-  return `${managementURL(input)}/api/dsh/v1`
-}
-
-export function bridgeManagementURL(input: string): string | undefined {
-  const url = normalizeURL(input)
-  return url.endsWith('/api/dsh/v1') ? url.slice(0, -'/api/dsh/v1'.length) : undefined
-}
+export const BRIDGE_CREDENTIAL_REF = 'WORKBUDDY_MANAGER_BRIDGE_8F4D2C1E9A0B7E6D5C3A1F2E4B6D8C0A'

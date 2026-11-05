@@ -28,6 +28,7 @@ export interface Connection {
   providerId: string
   candidates: Array<{ id: string; label: string }>
   url: string
+  api: 'openai-completions' | 'openai-responses'
   keyRef: string
   keyConfigured: boolean
   keyWritable: boolean
@@ -51,10 +52,15 @@ function modelsOf(value: unknown): Model[] {
   return value.filter((item): item is Model => typeof item === 'object' && item !== null && typeof item.id === 'string')
 }
 
+function apiOf(providerId: string, rawApi?: unknown): 'openai-completions' | 'openai-responses' {
+  if (providerId === BRIDGE_PROVIDER) return 'openai-completions'
+  return rawApi === 'openai-completions' ? 'openai-completions' : 'openai-responses'
+}
+
 /** Plugin-owned references and explicit names identify a WorkBuddy provider on any host and port. */
 function isWorkbuddyProvider(value: unknown): boolean {
   const provider = record(value)
-  if (provider.api !== 'openai-responses' || typeof provider.baseURL !== 'string') return false
+  if (!['openai-completions', 'openai-responses'].includes(String(provider.api)) || typeof provider.baseURL !== 'string') return false
   const keyRef = provider.apiKeyEnv
   if (typeof keyRef === 'string' && /^WORKBUDDY_MANAGER(?:_(?:KEY|BRIDGE)_[A-F0-9]{32}|_API_KEY)$/.test(keyRef)) return true
   if (typeof provider.displayName === 'string' && /workbuddy/i.test(provider.displayName)) return true
@@ -71,9 +77,11 @@ export async function loadConnection(remote: Remote, selectedId?: string): Promi
   if (!namespace) throw new Error('找不到 DSH 的模型适配器，请检查 llm-pi-ai 是否启用。')
   const providers = record(namespace.value.providers)
   const candidates = Object.entries(providers)
-    .filter(([id, value]) => id === PROVIDER || isWorkbuddyProvider(value))
+    .filter(([id, value]) => id === PROVIDER || id === BRIDGE_PROVIDER || isWorkbuddyProvider(value))
     .map(([id, value]) => ({ id, label: typeof record(value).displayName === 'string' ? `${record(value).displayName} (${id})` : id }))
-  if (selectedId && !candidates.some(candidate => candidate.id === selectedId) && (![BRIDGE_PROVIDER, PROVIDER].includes(selectedId) || providers[selectedId] !== undefined)) throw new Error('所选提供方已不存在或被占用，请重新载入。')
+  if (selectedId && !candidates.some(candidate => candidate.id === selectedId) && (![BRIDGE_PROVIDER, PROVIDER].includes(selectedId) || providers[selectedId] !== undefined)) {
+    throw new Error('所选提供方已不存在或被占用，请重新载入。')
+  }
   let providerId = selectedId ?? ''
   if (!providerId && candidates.some(candidate => candidate.id === BRIDGE_PROVIDER)) providerId = BRIDGE_PROVIDER
   if (!providerId && candidates.some(candidate => candidate.id === PROVIDER)) providerId = PROVIDER
@@ -87,6 +95,7 @@ export async function loadConnection(remote: Remote, selectedId?: string): Promi
     providerId,
     candidates,
     url: typeof raw.baseURL === 'string' ? raw.baseURL : DEFAULT_URL,
+    api: apiOf(providerId, raw.api),
     keyRef,
     keyConfigured: credential?.configured === true,
     keyWritable: credential?.writable === true,
@@ -102,11 +111,12 @@ export async function discover(remote: Remote, connection: Connection, address: 
   const baseURL = normalizeURL(address)
   if (!connection.providerId) throw new Error('请先选择已有的 WorkBuddy 提供方。')
   if (key && !/^[\x21-\x7e]+$/.test(key)) throw new Error('密钥不能包含空格、换行或非 ASCII 字符。')
-  if (!key && (!connection.existing || !connection.keyConfigured)) throw new Error('请输入 WorkBuddy Manager 创建的网关密钥。')
+  if (!key && (!connection.existing || !connection.keyConfigured)) throw new Error('请输入 WorkBuddy 网关密钥。')
+  const api = apiOf(connection.providerId, connection.api)
   const request = {
     ...(connection.existing ? { provider: connection.providerId } : {}),
     baseURL,
-    api: 'openai-responses',
+    api,
     ...(key ? { apiKey: key } : {}),
   }
   let found: Awaited<ReturnType<Remote['llm']['discoverModels']>>
@@ -140,10 +150,13 @@ export function mergeModels(current: Model[], discovered: Model[]): Model[] {
 }
 
 function newProvider(fields: Dictionary): Dictionary {
+  const isCompletions = fields.api === 'openai-completions'
   return {
-    displayName: 'WorkBuddy Manager', ...fields,
-    compat: { supportsMaxOutputTokens: false },
-    defaultContextWindow: 131072, defaultMaxTokens: 32768,
+    displayName: 'WorkBuddy Manager',
+    ...fields,
+    ...(isCompletions ? {} : { compat: { supportsMaxOutputTokens: false } }),
+    defaultContextWindow: 131072,
+    defaultMaxTokens: 32768,
   }
 }
 
@@ -152,12 +165,23 @@ export async function attachCredential(remote: Remote, connection: Connection, a
   const baseURL = normalizeURL(address)
   if (!connection.providerId) throw new Error('请先选择已有的 WorkBuddy 提供方。')
   if (!connection.writable) throw new Error('当前 DSH 配置不可写。')
-  const operations: Array<{ op: 'set'; path: string[]; value: unknown }> = connection.existing
+  const api = apiOf(connection.providerId, connection.api)
+  const operations: Array<{ op: 'set'; path: string[]; value: unknown }> = connection.existing && connection.providerId !== BRIDGE_PROVIDER
     ? [
         { op: 'set', path: ['providers', connection.providerId, 'apiKeyEnv'], value: ref },
         { op: 'set', path: ['providers', connection.providerId, 'baseURL'], value: baseURL },
       ]
-    : [{ op: 'set', path: ['providers', connection.providerId], value: newProvider({ ...(connection.providerId === BRIDGE_PROVIDER ? { displayName: 'WorkBuddy 账号池' } : {}), baseURL, api: 'openai-responses', apiKeyEnv: ref, models: [] }) }]
+    : [{
+        op: 'set',
+        path: ['providers', connection.providerId],
+        value: newProvider({
+          ...(connection.providerId === BRIDGE_PROVIDER ? { displayName: 'WorkBuddy 账号池' } : {}),
+          baseURL,
+          api,
+          apiKeyEnv: ref,
+          models: connection.existing ? connection.models : [],
+        }),
+      }]
   const updated = await remote.settings.mutate(NAMESPACE, operations, connection.revision)
   if (!updated.ok) throw new Error(updated.error.code === 'settings/conflict' ? '模型配置已被修改，请重新载入后再试。' : updated.error.message)
   return loadConnection(remote, connection.providerId)
@@ -173,9 +197,16 @@ export async function sync(remote: Remote, connection: Connection, address: stri
   if (!connection.providerId) throw new Error('请先选择已有的 WorkBuddy 提供方。')
   if (!connection.writable) throw new Error('当前 DSH 配置不可写。')
   if (key && !connection.keyWritable) throw new Error('当前凭据存储不可写。')
+  const api = apiOf(connection.providerId, connection.api)
   let current = connection
   if (!key && !current.existing && current.keyConfigured) {
-    const value = newProvider({ baseURL, api: 'openai-responses', apiKeyEnv: current.keyRef, models: [] })
+    const value = newProvider({
+      ...(current.providerId === BRIDGE_PROVIDER ? { displayName: 'WorkBuddy 账号池' } : {}),
+      baseURL,
+      api,
+      apiKeyEnv: current.keyRef,
+      models: [],
+    })
     const restored = await remote.settings.mutate(NAMESPACE, [{ op: 'set', path: ['providers', current.providerId], value }], current.revision)
     if (!restored.ok) throw new Error(restored.error.code === 'settings/conflict' ? '模型配置已被修改，请重新载入后再试。' : restored.error.message)
     current = await loadConnection(remote, current.providerId)
@@ -193,7 +224,7 @@ export async function sync(remote: Remote, connection: Connection, address: stri
     if (!status?.writable || status.configured) throw new Error('新凭据引用不可写或已被占用。')
   }
   const models = mergeModels(current.models, discovered)
-  const fields: Dictionary = { baseURL, api: 'openai-responses', apiKeyEnv: keyRef, models }
+  const fields: Dictionary = { baseURL, api, apiKeyEnv: keyRef, models }
   const operations: Array<{ op: 'set'; path: string[]; value: unknown }> = current.existing
     ? Object.entries(fields).map(([field, value]) => ({ op: 'set', path: ['providers', current.providerId, field], value }))
     : [{ op: 'set', path: ['providers', current.providerId], value: newProvider(fields) }]

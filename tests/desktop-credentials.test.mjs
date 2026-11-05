@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict'
 import { mkdtemp, rm, stat } from 'node:fs/promises'
-import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -8,7 +7,7 @@ import { pathToFileURL } from 'node:url'
 
 const runtime = process.env.DSH_RUNTIME_ROOT
 
-test('桌面凭据存储支持跨宿主重启恢复管理会话', { skip: !runtime, timeout: 15000 }, async t => {
+test('桌面凭据存储支持跨宿主重启持久化账号池与本地网关配置', { skip: !runtime, timeout: 15000 }, async t => {
   const load = name => import(pathToFileURL(join(runtime, 'node_modules/@deepseek-ai', name, 'lib/index.js')).href)
   const { Context } = await load('cordis')
   const { LocalCredentialProvider } = await load('dsh-credentials-local')
@@ -18,20 +17,7 @@ test('桌面凭据存储支持跨宿主重启恢复管理会话', { skip: !runti
   assert.ok(directory.startsWith(prefix))
   t.after(() => rm(directory, { recursive: true, force: true }))
   const file = join(directory, 'credentials.yaml')
-  const server = createServer((request, response) => {
-    response.setHeader('content-type', 'application/json')
-    if (request.url === '/api/healthz') return response.end(JSON.stringify({ ok: true, service: 'workbuddy-manager' }))
-    if (request.url === '/api/login') {
-      response.setHeader('set-cookie', 'wb_session=fixture-only; HttpOnly; Path=/')
-      return response.end(JSON.stringify({ ok: true, role: 'admin' }))
-    }
-    if (request.headers.cookie !== 'wb_session=fixture-only') { response.statusCode = 401; return response.end('{}') }
-    if (request.url === '/api/me') return response.end(JSON.stringify({ role: 'admin' }))
-    return response.end(JSON.stringify({ ok: true }))
-  })
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
-  t.after(() => new Promise(resolve => server.close(resolve)))
-  const address = `http://127.0.0.1:${server.address().port}/v1`
+
   const scopes = []
   t.after(async () => { for (const scope of scopes.reverse()) await scope.dispose() })
   const boot = async () => {
@@ -43,12 +29,35 @@ test('桌面凭据存储支持跨宿主重启恢复管理会话', { skip: !runti
     scopes.push(credentials, manager)
     return ctx.get('workbuddyManager')
   }
+
   const first = await boot()
-  await first.manage({ action: 'login', address, username: 'fixture', password: 'fixture-password' })
+  await first.pool.upsertSignedIn({
+    realm: 'cn',
+    uid: 'u-persist',
+    nickname: '持久化账号',
+    access: 'fixture-access',
+    refresh: 'fixture-refresh',
+    domain: 'copilot.tencent.com',
+    expires: Date.now() + 3600_000,
+  }, 88)
+  const bridge1 = await first.manage({ action: 'bridge' })
+  assert.match(bridge1.url, /^http:\/\/127\.0\.0\.1:\d+\/v1$/)
   assert.equal((await stat(file)).mode & 0o777, 0o600)
-  await scopes[1].dispose(); await scopes[0].dispose()
+  await scopes[1].dispose()
+  await scopes[0].dispose()
+  scopes.length = 0
+
   const second = await boot()
-  assert.deepEqual(await second.manage({ action: 'health', address }), { online: true, authenticated: true, role: 'admin' })
-  await second.manage({ action: 'logout', address })
-  assert.deepEqual(await second.manage({ action: 'health', address }), { online: true, authenticated: false })
+  const health = await second.manage({ action: 'health' })
+  assert.equal(health.online, true)
+  assert.equal(health.poolAvailable, true)
+  assert.equal(health.accountCount, 1)
+  const overview = await second.manage({ action: 'overview' })
+  assert.equal(overview.accounts.length, 1)
+  assert.equal(overview.accounts[0].nickname, '持久化账号')
+  assert.equal(overview.accounts[0].credits, 88)
+  await second.manage({ action: 'accountDelete', file: 'workbuddy-cn-u-persist.json' })
+  const afterDelete = await second.manage({ action: 'health' })
+  assert.equal(afterDelete.poolAvailable, false)
+  assert.equal(afterDelete.accountCount, 0)
 })

@@ -6,35 +6,51 @@ import { remoteMethods } from '@deepseek-ai/dsh-typert-protocol'
 import { ManagerRemote } from '../src/manager/service.js'
 import { TYPERT, TYPERT_REMOTE } from '../src/manager/contract.js'
 
-const fakeRef = `WORKBUDDY_MANAGER_KEY_${'A'.repeat(32)}`
-
-test('管理服务在宿主内登录、操作账号并安全绑定密钥', async t => {
-  const requests: Array<{ path: string; method: string; cookie?: string; body?: Record<string, unknown> }> = []
-  const server = createServer(async (req, res) => {
-    const chunks: Buffer[] = []
-    for await (const chunk of req) chunks.push(Buffer.from(chunk))
-    const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) as Record<string, unknown> : undefined
-    requests.push({ path: req.url || '', method: req.method || '', cookie: req.headers.cookie, body })
+test('管理服务在宿主内完成扫码登录、账号池管理与本地网关启动', async t => {
+  const requests: Array<{ path: string; method: string; headers: Record<string, string | string[] | undefined> }> = []
+  let pollStep = 0
+  let remainCredits = 128.5
+  const server = createServer((req, res) => {
+    requests.push({ path: req.url || '', method: req.method || '', headers: req.headers })
     res.setHeader('content-type', 'application/json')
-    if (req.url === '/api/healthz') return res.end(JSON.stringify({ ok: true, service: 'workbuddy-manager' }))
-    if (req.url === '/api/login') {
-      res.setHeader('set-cookie', 'wb_session=fixture-session; HttpOnly; Path=/')
-      return res.end(JSON.stringify({ ok: true, role: 'admin' }))
+    if (req.url?.startsWith('/v2/plugin/auth/state')) {
+      return res.end(JSON.stringify({
+        code: 0,
+        data: { state: 'fixture-state', authUrl: 'https://copilot.tencent.com/authorize?state=fixture-state' },
+      }))
     }
-    if (req.headers.cookie !== 'wb_session=fixture-session') { res.statusCode = 401; return res.end('{}') }
-    if (req.url === '/api/me') return res.end(JSON.stringify({ role: 'admin' }))
-    if (req.url === '/api/accounts') return res.end(JSON.stringify({ pool_available: true, manageable: true, accounts: [{ file: 'workbuddy-fixture.json', nickname: '测试账号', note: '测试备注', realm: 'cn', manual_disabled: false, access_token: 'fixture-account-secret' }] }))
-    if (req.url === '/api/keys' && req.method === 'GET') return res.end(JSON.stringify([{ id: 7, name: '已有名称', realm: '', enabled: true, prefix: 'fixture-prefix', quota: 500, used_tokens: 3, quota_credit: 0, used_credit: 1 }]))
-    if (req.url === '/api/keys' && req.method === 'POST') return res.end(JSON.stringify({ id: 8, key: 'fixture-created-secret' }))
-    if (req.url === '/api/keys/7/reveal') return res.end(JSON.stringify({ key: 'fixture-gateway-secret' }))
-    if (req.url === '/api/auth/start') return res.end(JSON.stringify({ state: 'fixture-private-state', authUrl: 'https://example.test/authorize?state=fixture&method=browser', realm: 'cn' }))
-    if (req.url?.startsWith('/api/auth/poll?')) return res.end(JSON.stringify({ status: 'success', uid: 'fixture-private-uid' }))
-    return res.end(JSON.stringify({ ok: true }))
+    if (req.url?.startsWith('/v2/plugin/auth/token?state=fixture-state')) {
+      pollStep++
+      if (pollStep === 1) return res.end(JSON.stringify({ code: 0, data: {} }))
+      return res.end(JSON.stringify({
+        code: 0,
+        data: {
+          accessToken: 'fixture-access-secret',
+          refreshToken: 'fixture-refresh-secret',
+          domain: 'copilot.tencent.com',
+          expiresIn: 3600,
+        },
+      }))
+    }
+    if (req.url?.startsWith('/v2/plugin/login/account?state=fixture-state')) {
+      return res.end(JSON.stringify({
+        code: 0,
+        data: { uid: 'u-1001', nickname: '测试开发者', type: 'personal' },
+      }))
+    }
+    if (req.url === '/billing/meter/get-user-resource-summary') {
+      return res.end(JSON.stringify({
+        code: 0,
+        data: { Packages: [{ CycleRemainCapacity: remainCredits }] },
+      }))
+    }
+    res.statusCode = 404
+    return res.end('{}')
   })
   await new Promise<void>(done => server.listen(0, '127.0.0.1', done))
   t.after(() => new Promise<void>(done => server.close(() => done())))
-  const port = (server.address() as { port: number }).port
-  const address = `http://127.0.0.1:${port}/v1`
+  const endpoint = `http://127.0.0.1:${(server.address() as { port: number }).port}`
+
   const values = new Map<string, string>()
   const records = new Map<string, unknown>()
   const ctx = new Context()
@@ -42,74 +58,74 @@ test('管理服务在宿主内登录、操作账号并安全绑定密钥', async
     describe: async (ref: string) => ({ configured: values.has(ref), writable: true }),
     set: async (ref: string, value: string) => { values.set(ref, value) },
     readRecord: async (key: string) => records.get(key),
-    modifyRecord: async (key: string, update: (value: unknown) => Promise<unknown>) => { const value = await update(records.get(key)); records.set(key, value); return value },
+    modifyRecord: async (key: string, update: (value: unknown) => Promise<unknown>) => {
+      const value = await update(records.get(key))
+      records.set(key, value)
+      return value
+    },
     deleteRecord: async (key: string) => { records.delete(key) },
   })
-  const scope = ctx.plugin(ManagerRemote)
+  const scope = ctx.plugin(ManagerRemote, { sites: { cn: { endpoint }, global: { endpoint } } })
   await scope
   t.after(() => scope.dispose())
+
   const service = ctx.get('workbuddyManager') as ManagerRemote
   assert.equal(remoteMethods(service)[0].method, 'manage')
   assert.equal(TYPERT_REMOTE.descriptors[0].id, 'dsh-workbuddy-manager#workbuddy/manage')
   assert.equal(TYPERT.invocations.length, 1)
-  assert.deepEqual(await service.manage({ action: 'health', address }), { online: true, authenticated: false })
-  assert.deepEqual(await service.manage({ action: 'login', address, username: 'fixture', password: 'fixture-password' }), { ok: true, role: 'admin' })
-  assert.deepEqual(await service.manage({ action: 'health', address }), { online: true, authenticated: true, role: 'admin' })
-  const overview = await service.manage({ action: 'overview', address })
-  assert.equal(JSON.stringify(overview).includes('fixture-account-secret'), false)
-  assert.equal(JSON.stringify(overview).includes('fixture-prefix'), false)
-  assert.deepEqual((overview as { accounts: unknown[] }).accounts, [{ file: 'workbuddy-fixture.json', nickname: '测试账号', note: '测试备注', realm: 'cn', disabled: false, blocked: false, expired: false, inPool: false, cooling: false, credits: null }])
-  assert.deepEqual((overview as { keys: unknown[] }).keys, [{ id: 7, name: '已有名称', realm: '', enabled: true, quota: 500, usedTokens: 3, quotaCredit: 0, usedCredit: 1 }])
-  await service.manage({ action: 'accountDisabled', address, file: 'workbuddy-fixture.json', disabled: true })
-  assert.deepEqual(requests.at(-1)?.body, { disabled: true })
-  assert.deepEqual(await service.manage({ action: 'createKey', address, name: '测试密钥', realm: 'global' }), { ok: true })
-  assert.deepEqual(requests.at(-1)?.body, { name: '测试密钥', realm: 'global' })
-  await service.manage({ action: 'createKey', address, name: '默认密钥' })
-  assert.deepEqual(requests.at(-1)?.body, { name: '默认密钥' })
-  await service.manage({ action: 'renameKey', address, id: 7, name: '新名称' })
-  assert.deepEqual(requests.at(-1)?.body, { name: '新名称' })
-  assert.deepEqual(await service.manage({ action: 'useKey', address, id: 7, ref: fakeRef }), { ok: true })
-  assert.equal(values.get(fakeRef), 'fixture-gateway-secret')
-  await assert.rejects(service.manage({ action: 'useKey', address, id: 7, ref: fakeRef }), /已被占用/)
-  assert.deepEqual(await service.manage({ action: 'authStart', address, realm: 'cn', region: '' }), { authUrl: 'https://example.test/authorize?state=fixture&method=browser' })
-  assert.deepEqual(await service.manage({ action: 'authPoll', address }), { status: 'success' })
-  assert.ok(requests.at(-1)?.path.includes('state=fixture-private-state'))
-  await service.manage({ action: 'logout', address })
-  await assert.rejects(service.manage({ action: 'overview', address }), /请先登录/)
+
+  const initialHealth = await service.manage({ action: 'health' }) as { online: boolean; gatewayURL: string; poolAvailable: boolean; accountCount: number }
+  assert.equal(initialHealth.online, true)
+  assert.match(initialHealth.gatewayURL, /^http:\/\/127\.0\.0\.1:\d+\/v1$/)
+  assert.equal(initialHealth.poolAvailable, false)
+  assert.equal(initialHealth.accountCount, 0)
+
+  const started = await service.manage({ action: 'authStart', realm: 'cn' }) as { authUrl: string }
+  assert.match(started.authUrl, /^https:\/\/copilot\.tencent\.com\/authorize\?state=fixture-state&version=5\.9\.3&loginSessionId=[0-9a-f]{32}$/)
+
+  assert.deepEqual(await service.manage({ action: 'authPoll' }), { status: 'pending' })
+  const finished = await service.manage({ action: 'authPoll' }) as { status: string; account: { file: string; nickname: string; credits: number } }
+  assert.equal(finished.status, 'success')
+  assert.equal(finished.account.file, 'workbuddy-cn-u-1001.json')
+  assert.equal(finished.account.nickname, '测试开发者')
+  assert.equal(finished.account.credits, 128.5)
+
+  const overview = await service.manage({ action: 'overview' }) as { accounts: Array<{ file: string; disabled: boolean; inPool: boolean; credits: number }>; poolAvailable: boolean }
+  assert.equal(JSON.stringify(overview).includes('fixture-access-secret'), false)
+  assert.equal(JSON.stringify(overview).includes('fixture-refresh-secret'), false)
+  assert.equal(overview.poolAvailable, true)
+  assert.equal(overview.accounts.length, 1)
+  assert.equal(overview.accounts[0].inPool, true)
+
+  await service.manage({ action: 'accountDisabled', file: 'workbuddy-cn-u-1001.json', disabled: true })
+  const disabledOverview = await service.manage({ action: 'overview' }) as { accounts: Array<{ disabled: boolean; inPool: boolean }>; poolAvailable: boolean }
+  assert.equal(disabledOverview.poolAvailable, false)
+  assert.equal(disabledOverview.accounts[0].disabled, true)
+
+  await service.manage({ action: 'accountDisabled', file: 'workbuddy-cn-u-1001.json', disabled: false })
+  remainCredits = 96.25
+  await service.manage({ action: 'accountRefresh', file: 'workbuddy-cn-u-1001.json' })
+  const refreshedOverview = await service.manage({ action: 'overview' }) as { accounts: Array<{ credits: number; inPool: boolean }> }
+  assert.equal(refreshedOverview.accounts[0].credits, 96.25)
+  assert.equal(refreshedOverview.accounts[0].inPool, true)
+
+  await service.manage({ action: 'accountDelete', file: 'workbuddy-cn-u-1001.json' })
+  const emptyOverview = await service.manage({ action: 'overview' }) as { accounts: unknown[]; poolAvailable: boolean }
+  assert.deepEqual(emptyOverview.accounts, [])
+  assert.equal(emptyOverview.poolAvailable, false)
 })
 
-test('登录拒绝重定向且错误不回显密码', async t => {
-  let followed = false
-  const server = createServer((req, res) => {
-    if (req.url === '/api/login') { res.writeHead(302, { location: '/sink' }); res.end(); return }
-    followed = true
-    res.end('{}')
-  })
-  await new Promise<void>(done => server.listen(0, '127.0.0.1', done))
-  t.after(() => new Promise<void>(done => server.close(() => done())))
-  const address = `http://127.0.0.1:${(server.address() as { port: number }).port}/v1`
-  const ctx = new Context()
-  const scope = ctx.plugin(ManagerRemote)
-  await scope
-  t.after(() => scope.dispose())
-  const service = ctx.get('workbuddyManager') as ManagerRemote
-  await assert.rejects(service.manage({ action: 'login', address, username: 'fixture', password: 'fixture-password' }), error => {
-    assert.equal((error as Error).message.includes('fixture-password'), false)
-    return true
-  })
-  assert.equal(followed, false)
-})
-
-test('管理服务拒绝危险地址和未授权操作', async () => {
+test('管理服务拒绝非法参数与非所有者调用', async () => {
   const ctx = new Context()
   const scope = ctx.plugin(ManagerRemote)
   await scope
   try {
     const service = ctx.get('workbuddyManager') as ManagerRemote
-    await assert.rejects(service.manage({ action: 'health', address: 'http://example.test/v1' }), /地址无效/)
-    await assert.rejects(service.manage({ action: 'accountDisabled', address: 'http://localhost:7864/v1', file: '../config', disabled: true }), /请求格式无效/)
-    await assert.rejects(service.manage({ action: 'useKey', address: 'http://localhost:7864/v1', id: 1, ref: 'OTHER_SERVICE_API_KEY' }), /请求格式无效/)
+    await assert.rejects(service.manage({ action: 'accountDisabled', file: '../config', disabled: true }), /请求格式无效/)
+    await assert.rejects(service.manage({ action: 'accountDelete', file: 'other.json' }), /请求格式无效/)
     const nonOwner = ctx.extend({ invocation: { peer: { principal: { kind: 'guest', id: 'fixture' } } } }).get('workbuddyManager') as ManagerRemote
-    await assert.rejects(nonOwner.manage({ action: 'health', address: 'http://localhost:7864/v1' }), /只有 DSH 所有者/)
-  } finally { await scope.dispose() }
+    await assert.rejects(nonOwner.manage({ action: 'health' }), /只有 DSH 所有者/)
+  } finally {
+    await scope.dispose()
+  }
 })

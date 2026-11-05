@@ -3,6 +3,7 @@ import { test } from 'node:test'
 import { createServer } from 'node:http'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { gunzipSync } from 'node:zlib'
 import { loadConnection, sync } from '../lib/ui/connection.js'
 import { connectBridge } from '../lib/ui/bridge-connection.js'
 
@@ -11,7 +12,7 @@ const root = resolve(import.meta.dirname, '..')
 const ok = value => ({ ok: true, value })
 
 // Electron's Node mode reads the desktop app's asar and actual pi-ai runtime.
-test('桌面宿主同步真实模型发现并保留其他路由', { skip: !runtimeRoot }, async t => {
+test('桌面宿主同步真实模型发现并驱动内置本地网关', { skip: !runtimeRoot }, async t => {
   const load = path => import(pathToFileURL(resolve(runtimeRoot, 'node_modules/@deepseek-ai', path)).href)
   const { composeEntries, loadOverlayPatches } = await load('dsh-app-boot/lib/index.js')
   const { Config, apply } = await load('dsh-llm-pi-ai/lib/index.js')
@@ -35,28 +36,55 @@ test('桌面宿主同步真实模型发现并保留其他路由', { skip: !runti
   const server = createServer(async (req, res) => {
     const parts = []
     for await (const part of req) parts.push(part)
-    requests.push({ path: req.url, auth: req.headers.authorization, body: parts.length ? JSON.parse(Buffer.concat(parts).toString()) : undefined })
-    if (req.url === '/api/healthz') {
+    const raw = Buffer.concat(parts)
+    const decoded = req.headers['content-encoding'] === 'gzip' ? gunzipSync(raw).toString('utf8') : raw.toString('utf8')
+    requests.push({
+      path: req.url,
+      auth: req.headers.authorization,
+      headers: req.headers,
+      body: decoded ? JSON.parse(decoded) : undefined,
+    })
+    if (req.url === '/v3/config') {
       res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, service: 'workbuddy-manager' }))
+      res.end(JSON.stringify({
+        code: 0,
+        data: {
+          agents: [{ name: 'cli', models: ['glm-test'] }],
+          models: [{ id: 'glm-test', name: 'GLM Test', maxInputTokens: 131072, maxOutputTokens: 32768 }],
+        },
+      }))
       return
     }
-    if (req.url === '/api/login') {
-      res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': 'wb_session=fixture-session; Path=/' })
-      res.end(JSON.stringify({ ok: true, role: 'admin' }))
+    if (req.url === '/v2/chat/completions') {
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      const chunk1 = {
+        id: 'chatcmpl-1',
+        object: 'chat.completion.chunk',
+        created: 1,
+        model: 'glm-test',
+        choices: [{
+          index: 0,
+          delta: {
+            role: 'assistant',
+            tool_calls: [{ index: 0, id: 'call_test', type: 'function', function: { name: 'read_file', arguments: '{"path":"README.md"}' } }],
+          },
+          finish_reason: null,
+        }],
+      }
+      const chunk2 = {
+        id: 'chatcmpl-1',
+        object: 'chat.completion.chunk',
+        created: 1,
+        model: 'glm-test',
+        choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+        usage: { prompt_tokens: 5, completion_tokens: 5, total_tokens: 10 },
+      }
+      res.write(`data: ${JSON.stringify(chunk1)}\n\n`)
+      res.write(`data: ${JSON.stringify(chunk2)}\n\n`)
+      res.end('data: [DONE]\n\n')
       return
     }
-    if (req.url === '/api/dsh/session') {
-      if (req.headers.cookie !== 'wb_session=fixture-session') { res.writeHead(401).end('{}'); return }
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ token: 'fixture-bridge-grant' }))
-      return
-    }
-    if (req.url?.startsWith('/api/dsh/v1/') && req.headers.authorization !== 'Bearer fixture-bridge-grant') {
-      res.writeHead(401).end('{}')
-      return
-    }
-    if (req.url === '/v1/models' || req.url === '/api/dsh/v1/models') {
+    if (req.url === '/v1/models') {
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ object: 'list', data: [{ id: 'glm-test', object: 'model' }] }))
       return
@@ -84,7 +112,9 @@ test('桌面宿主同步真实模型发现并保留其他路由', { skip: !runti
   })
   await new Promise(done => server.listen(0, '127.0.0.1', done))
   t.after(() => new Promise(done => server.close(done)))
-  const baseURL = `http://127.0.0.1:${server.address().port}/v1`
+  const endpoint = `http://127.0.0.1:${server.address().port}`
+  const baseURL = `${endpoint}/v1`
+
   {
     const { validateTypertManifest } = await load('dsh-typert-loader/lib/index.js')
     const { TypertGatewayService } = await load('dsh-api-gateway/lib/index.js')
@@ -94,7 +124,7 @@ test('桌面宿主同步真实模型发现并保留其他路由', { skip: !runti
     validateTypertManifest('dsh-workbuddy-manager', TYPERT)
     const descriptor = TYPERT.invocations[0]
     const host = new Context()
-    host.provide('typert', { local: { get: endpoint => endpoint === 'workbuddy/manage' ? descriptor : undefined, hasSeen: () => false }, resources: { entries: () => [] } })
+    host.provide('typert', { local: { get: ep => ep === 'workbuddy/manage' ? descriptor : undefined, hasSeen: () => false }, resources: { entries: () => [] } })
     host.provide('remoteAccess', { decide: () => ({ kind: 'allow' }) })
     host.provide('credentials', { readRecord: async () => undefined, modifyRecord: async () => undefined, deleteRecord: async () => {} })
     const managerScope = host.plugin(ManagerRemote)
@@ -103,20 +133,24 @@ test('桌面宿主同步真实模型发现并保留其他路由', { skip: !runti
     try {
       const gateway = host.get('typertGateway')
       const peer = { principal: { kind: 'owner' }, signal: new AbortController().signal }
-      const request = { namespace: 'workbuddy', method: 'manage', args: { request: { action: 'health', address: baseURL } }, peer }
-      assert.deepEqual(await gateway.invoke(request), { online: true, authenticated: false })
+      const request = { namespace: 'workbuddy', method: 'manage', args: { request: { action: 'health' } }, peer }
+      const health = await gateway.invoke(request)
+      assert.equal(health.online, true)
+      assert.match(health.gatewayURL, /^http:\/\/127\.0\.0\.1:\d+\/v1$/)
       await assert.rejects(gateway.invoke({ ...request, peer: { ...peer, principal: { kind: 'guest', id: 'fixture' } } }), /只有 DSH 所有者/)
-      await assert.rejects(gateway.invoke({ ...request, args: { request: { action: 'health', address: 123 } } }), /invalid|decode|codec|request/i)
+      await assert.rejects(gateway.invoke({ ...request, args: { request: { action: 'unknown' } } }), /invalid|decode|codec|request/i)
     } finally {
       await gatewayScope.dispose()
       await managerScope.dispose()
     }
     requests.length = 0
   }
+
   let providers = { other: { api: 'openai-responses', baseURL, apiKeyEnv: 'OTHER_KEY', models: [{ id: 'other-model' }] } }
   let resolved = Config({ providers }).providers.get()
   const credential = new Map()
   const callbacks = {}
+  const headerListeners = []
   let registration
   let discovery
   const llm = {
@@ -132,11 +166,25 @@ test('桌面宿主同步真实模型发现并保留其他路由', { skip: !runti
     fiber: { entry: { options: { id: 'llm-pi-ai' } } },
     get: name => name === 'credentials' ? { resolve: async ref => credential.has(ref) ? { value: credential.get(ref) } : undefined } : undefined,
     inject() {},
-    on(name, callback) { callbacks[name] = callback },
-    waterfall: (_name, _request, _headers, next) => next(),
+    on(name, callback) {
+      callbacks[name] = callback
+      if (name === 'llm-pi-ai/request-headers') headerListeners.push(callback)
+    },
+    waterfall: (name, request, headers, next) => {
+      if (name === 'llm-pi-ai/request-headers') {
+        let current = next
+        for (const listener of headerListeners) {
+          const prev = current
+          current = () => listener(request, headers, prev)
+        }
+        return current()
+      }
+      return next()
+    },
   }
   apply(ctx, { providers: { get: () => resolved } })
   assert.deepEqual(registration.routes, ['other'])
+
   let revision = 1
   const entry = { options: { id: 'llm-pi-ai' }, fiber: { runtime: { Config } } }
   const settings = Object.create(SettingsForms.prototype)
@@ -162,48 +210,10 @@ test('桌面宿主同步真实模型发现并保留其他路由', { skip: !runti
     },
     llm: { discoverModels: async (_ns, request) => ok(await discovery(request)) },
   }
+
   const connection = await loadConnection(remote)
   assert.equal(await sync(remote, connection, baseURL, 'fixture-key'), 1)
   assert.deepEqual(registration.routes, ['other', 'workbuddy-manager'])
-  assert.deepEqual(providers.other.models, [{ id: 'other-model' }])
-  assert.match(providers['workbuddy-manager'].apiKeyEnv, /^WORKBUDDY_MANAGER_KEY_[A-F0-9]{32}$/)
-  assert.equal(JSON.stringify(providers).includes('fixture-key'), false)
-  assert.equal(credential.get(providers['workbuddy-manager'].apiKeyEnv), 'fixture-key')
-
-  providers['workbuddy-manager'].headers = { 'X-Custom': 'preserve' }
-  providers['workbuddy-manager'].models[0].name = '自定义名称'
-  resolved = Config({ providers }).providers.get()
-  const existing = await loadConnection(remote)
-  assert.equal(await sync(remote, existing, baseURL, ''), 1)
-  assert.deepEqual(providers['workbuddy-manager'].headers, { 'X-Custom': 'preserve' })
-  assert.equal(providers['workbuddy-manager'].models[0].name, '自定义名称')
-  assert.deepEqual(providers.other.models, [{ id: 'other-model' }])
-
-  const models = await registration.adapter.listModels('workbuddy-manager')
-  assert.deepEqual(models.map(model => model.id), ['glm-test'])
-  const chunks = []
-  for await (const chunk of registration.adapter.stream({
-    provider: 'workbuddy-manager', model: 'glm-test', maxTokens: 100,
-    messages: [{ role: 'user', content: [{ type: 'text', text: '你好' }] }],
-  })) chunks.push(chunk)
-  assert.deepEqual(requests.map(request => request.path), ['/v1/models', '/v1/models', '/v1/responses'])
-  assert.equal(requests[0].auth, 'Bearer fixture-key')
-  assert.equal(requests[1].auth, 'Bearer fixture-key')
-  assert.equal(requests[2].auth, 'Bearer fixture-key')
-  assert.equal(requests[2].body.model, 'glm-test')
-  assert.equal(requests[2].body.stream, true)
-  assert.ok(JSON.stringify(chunks).includes('你好'))
-
-  const toolChunks = []
-  for await (const chunk of registration.adapter.stream({
-    provider: 'workbuddy-manager', model: 'glm-test',
-    messages: [{ role: 'user', content: [{ type: 'text', text: '读取文件' }] }],
-    tools: [{ name: 'read_file', description: 'Read a file', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } }],
-  })) toolChunks.push(chunk)
-  assert.equal(requests[3].body.tools[0].name, 'read_file')
-  const toolCall = toolChunks.find(chunk => chunk.type === 'block-end' && chunk.block?.type === 'tool-call')
-  assert.equal(toolCall?.block.name, 'read_file')
-  assert.deepEqual(JSON.parse(toolCall.block.arguments), { path: 'README.md' })
 
   const { Context } = await load('cordis/lib/index.js')
   const { ManagerRemote } = await import('../lib/manager/service.js')
@@ -217,27 +227,53 @@ test('桌面宿主同步真实模型发现并保留其他路由', { skip: !runti
     modifyRecord: async (key, update) => { const value = await update(records.get(key)); records.set(key, value); return value },
     deleteRecord: async key => { records.delete(key) },
   })
-  const managerScope = host.plugin(ManagerRemote)
+  const managerScope = host.plugin(ManagerRemote, { sites: { cn: { endpoint }, global: { endpoint } } })
   await managerScope
   t.after(() => managerScope.dispose())
   const manager = host.get('workbuddyManager')
-  await manager.manage({ action: 'login', address: baseURL, username: 'fixture', password: 'fixture-password' })
+  headerListeners.push((request, headers, next) => {
+    const out = next()
+    if (request.provider === 'workbuddy-manager-session') {
+      if (request.sessionId) out.set('x-magpie-workbuddy-session', request.sessionId)
+      out.set('authorization', `Bearer ${manager.gateway.token}`)
+    }
+    return out
+  })
+
+  await manager.pool.upsertSignedIn({
+    realm: 'cn',
+    uid: 'u-desktop',
+    nickname: '桌面测试账号',
+    access: 'fixture-wb-access',
+    refresh: 'fixture-wb-refresh',
+    domain: 'copilot.tencent.com',
+    expires: Date.now() + 3600_000,
+  }, 100)
+
   const bridgeRemote = { ...remote, workbuddy: { manage: async request => ok(await manager.manage(request)) } }
-  assert.equal(await connectBridge(bridgeRemote, baseURL, () => true), 1)
+  assert.equal(await connectBridge(bridgeRemote, () => true), 1)
   assert.ok(registration.routes.includes('workbuddy-manager-session'))
-  assert.equal(providers['workbuddy-manager'].apiKeyEnv.startsWith('WORKBUDDY_MANAGER_KEY_'), true)
-  assert.equal(JSON.stringify(providers).includes('fixture-bridge-grant'), false)
+  assert.equal(providers['workbuddy-manager-session'].api, 'openai-completions')
+  assert.equal(JSON.stringify(providers).includes(manager.gateway.token), false)
+
   const bridgeChunks = []
   for await (const chunk of registration.adapter.stream({
-    provider: 'workbuddy-manager-session', model: 'glm-test',
+    provider: 'workbuddy-manager-session',
+    model: 'glm-test',
+    sessionId: 'desktop-session-1',
     messages: [{ role: 'user', content: [{ type: 'text', text: '读取文件' }] }],
     tools: [{ name: 'read_file', description: 'Read a file', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } }],
   })) bridgeChunks.push(chunk)
+
   const bridged = bridgeChunks.find(chunk => chunk.type === 'block-end' && chunk.block?.type === 'tool-call')
   assert.equal(bridged?.block.name, 'read_file')
   assert.deepEqual(JSON.parse(bridged.block.arguments), { path: 'README.md' })
-  const bridgeRequest = requests.find(request => request.path === '/api/dsh/v1/responses')
-  assert.equal(bridgeRequest?.auth, 'Bearer fixture-bridge-grant')
-  assert.equal(bridgeRequest?.body.tools[0].name, 'read_file')
-  assert.equal(requests.some(request => request.path === '/api/keys'), false)
+
+  const upstreamChat = requests.find(request => request.path === '/v2/chat/completions')
+  assert.ok(upstreamChat)
+  assert.equal(upstreamChat.auth, 'Bearer fixture-wb-access')
+  assert.equal(upstreamChat.headers['x-stainless-runtime'], 'node')
+  assert.equal(upstreamChat.headers['content-encoding'], 'gzip')
+  assert.match(upstreamChat.headers['x-conversation-id'], /^[0-9a-f]{32}$/)
+  assert.equal(upstreamChat.body.tools[0].function.name, 'read_file')
 })

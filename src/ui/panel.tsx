@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
-import { attachCredential, DEFAULT_URL, discover, loadConnection, safeMessage, sync, type Connection } from './connection.js'
+import { attachCredential, DEFAULT_URL, discardUnusedCredential, discover, loadConnection, normalizeURL, safeMessage, sync, type Connection } from './connection.js'
 import { Management, type AppRemote } from './management.js'
 
 const css = `
@@ -39,6 +39,7 @@ interface Props { remote: AppRemote }
 export function WorkbuddyPanel({ remote }: Props) {
   const [connection, setConnection] = useState<Connection>()
   const [address, setAddress] = useState(DEFAULT_URL)
+  const [managementAddress, setManagementAddress] = useState(DEFAULT_URL)
   const [key, setKey] = useState('')
   const [busy, setBusy] = useState(true)
   const [managementBusy, setManagementBusy] = useState(false)
@@ -53,6 +54,7 @@ export function WorkbuddyPanel({ remote }: Props) {
       const current = await loadConnection(remote, selectedId)
       setConnection(current)
       setAddress(current.url)
+      setManagementAddress(current.url)
       if (selectedId) setKey('')
       if (current.existing && current.keyConfigured) {
         setStatus('正在检查连接…')
@@ -74,6 +76,14 @@ export function WorkbuddyPanel({ remote }: Props) {
   }, [remote])
 
   useEffect(() => { installStyles(); void load() }, [load])
+
+  /** The management page follows a settled address, not each keystroke of the draft. */
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      try { setManagementAddress(normalizeURL(address)) } catch { /* Keep the last valid address while typing. */ }
+    }, 400)
+    return () => clearTimeout(timer)
+  }, [address])
 
   const check = async () => {
     if (!connection) return
@@ -98,6 +108,7 @@ export function WorkbuddyPanel({ remote }: Props) {
       const current = await loadConnection(remote, connection.providerId)
       setConnection(current)
       setAddress(current.url)
+      setManagementAddress(current.url)
       setStatus(`已连接 · 已同步 ${count} 个模型`)
       setMessage('保存成功。现在可以在对话的模型选择器中选择 WorkBuddy Manager。')
     } catch (error) {
@@ -107,16 +118,24 @@ export function WorkbuddyPanel({ remote }: Props) {
   }
 
   const useManagedKey = async (ref: string) => {
-    if (!connection) throw new Error('模型连接尚未载入。')
-    const current = await attachCredential(remote, connection, address, ref)
-    setConnection(current)
     try {
+      if (!connection) throw new Error('模型连接尚未载入。')
+      const current = await attachCredential(remote, connection, address, ref)
+      setConnection(current)
       const count = await sync(remote, current, address, '')
       const updated = await loadConnection(remote, current.providerId)
-      setConnection(updated); setAddress(updated.url); setStatus(`已连接 · 已同步 ${count} 个模型`)
+      setConnection(updated)
+      setAddress(updated.url)
+      setManagementAddress(updated.url)
+      setStatus(`已连接 · 已同步 ${count} 个模型`)
     } catch (error) {
-      setStatus('密钥已绑定，模型同步未完成')
-      throw error
+      // The live provider config decides whether the key is in use; keep it when the check itself fails.
+      let bound = true
+      try { bound = (await loadConnection(remote, connection?.providerId)).keyRef === ref }
+      catch { /* Leave the key alone rather than delete an active reference. */ }
+      setStatus(bound ? '密钥已绑定，模型同步未完成' : '密钥绑定未完成')
+      const hint = bound ? '' : await discardUnusedCredential(remote, ref)
+      throw new Error(`${safeMessage(error, '')}${hint}`)
     }
   }
 
@@ -152,7 +171,7 @@ export function WorkbuddyPanel({ remote }: Props) {
       </div>
     </form>
     </details>
-    {connection && <Management key={address} remote={remote} address={address} disabled={busy} writable={connection.writable && connection.keyWritable && Boolean(connection.providerId)} onBusyChange={setManagementBusy} onKeySelected={useManagedKey} />}
+    {connection && <Management remote={remote} address={managementAddress} disabled={busy} writable={connection.writable && connection.keyWritable && Boolean(connection.providerId)} onBusyChange={setManagementBusy} onKeySelected={useManagedKey} />}
     {connection && connection.models.length > 0 && <div className="wb-card">
       <strong>已配置模型 · {connection.models.length}</strong>
       <ul>{connection.models.map(model => <li key={model.id}>{model.name || model.id}</li>)}</ul>

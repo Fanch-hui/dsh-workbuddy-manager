@@ -18,6 +18,7 @@ export interface Remote {
   credentials: {
     describe(refs: string[]): Promise<RemoteResult<Record<string, { configured: boolean; writable: boolean }>>>
     set(ref: string, value: string): Promise<RemoteResult<unknown>>
+    unset(ref: string): Promise<RemoteResult<unknown>>
   }
   llm: {
     discoverModels(ns: string, request: { provider?: string; baseURL: string; api: string; apiKey?: string }): Promise<RemoteResult<Array<{ id: string; name?: string; contextWindow?: number; maxTokens?: number; inputModalities?: string[] }>>>
@@ -50,13 +51,17 @@ function modelsOf(value: unknown): Model[] {
   return value.filter((item): item is Model => typeof item === 'object' && item !== null && typeof item.id === 'string')
 }
 
-function isLocalWorkbuddy(value: unknown): boolean {
+/** Plugin-owned references and explicit names identify a WorkBuddy provider on any host and port. */
+function isWorkbuddyProvider(value: unknown): boolean {
   const provider = record(value)
   if (provider.api !== 'openai-responses' || typeof provider.baseURL !== 'string') return false
+  const keyRef = provider.apiKeyEnv
+  if (typeof keyRef === 'string' && /^WORKBUDDY_MANAGER(?:_KEY_[A-F0-9]{32}|_API_KEY)$/.test(keyRef)) return true
+  if (typeof provider.displayName === 'string' && /workbuddy/i.test(provider.displayName)) return true
   try {
     const url = new URL(normalizeURL(provider.baseURL))
     return url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
-      && url.port === '7864' && url.pathname === '/v1'
+      && url.port === '7864' && url.pathname.endsWith('/v1')
   } catch { return false }
 }
 
@@ -66,7 +71,7 @@ export async function loadConnection(remote: Remote, selectedId?: string): Promi
   if (!namespace) throw new Error('找不到 DSH 的模型适配器，请检查 llm-pi-ai 是否启用。')
   const providers = record(namespace.value.providers)
   const candidates = Object.entries(providers)
-    .filter(([id, value]) => id === PROVIDER || isLocalWorkbuddy(value))
+    .filter(([id, value]) => id === PROVIDER || isWorkbuddyProvider(value))
     .map(([id, value]) => ({ id, label: typeof record(value).displayName === 'string' ? `${record(value).displayName} (${id})` : id }))
   if (selectedId && !candidates.some(candidate => candidate.id === selectedId)) throw new Error('所选提供方已不存在，请重新载入。')
   let providerId = selectedId ?? ''
@@ -187,16 +192,30 @@ export async function sync(remote: Remote, connection: Connection, address: stri
   const operations: Array<{ op: 'set'; path: string[]; value: unknown }> = current.existing
     ? Object.entries(fields).map(([field, value]) => ({ op: 'set', path: ['providers', current.providerId, field], value }))
     : [{ op: 'set', path: ['providers', current.providerId], value: newProvider(fields) }]
-  const updated = await remote.settings.mutate(NAMESPACE, operations, current.revision)
-  if (!updated.ok) throw new Error(updated.error.code === 'settings/conflict' ? '模型配置已被修改，请重新载入后再试。' : updated.error.message)
   if (key) {
-    try {
-      result(await remote.credentials.set(keyRef, key))
-    } catch (error) {
-      throw new Error(`模型配置已更新，但密钥保存失败：${safeMessage(error, key)}`)
+    try { result(await remote.credentials.set(keyRef, key)) }
+    catch (error) {
+      throw new Error(`密钥保存失败，模型配置未改动：${safeMessage(error, key)}${await discardUnusedCredential(remote, keyRef)}`)
     }
   }
+  const updated = await remote.settings.mutate(NAMESPACE, operations, current.revision)
+  if (!updated.ok) {
+    const reason = updated.error.code === 'settings/conflict' ? '模型配置已被修改，请重新载入后再试。' : updated.error.message
+    const hint = key ? await discardUnusedCredential(remote, keyRef) : ''
+    throw new Error(`${reason}${hint}`)
+  }
   return models.length
+}
+
+/** Remove a credential written for a change that did not take effect; report a failed cleanup to the user. */
+export async function discardUnusedCredential(remote: Remote, ref: string): Promise<string> {
+  try {
+    const answer = await remote.credentials.unset(ref)
+    if (answer.ok) return ''
+    return `；未使用的密钥清理失败：${answer.error.message}`
+  } catch (error) {
+    return `；未使用的密钥清理失败：${safeMessage(error, '')}`
+  }
 }
 
 export function safeMessage(error: unknown, key: string): string {

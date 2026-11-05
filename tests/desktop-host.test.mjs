@@ -142,6 +142,7 @@ test('桌面宿主同步真实模型发现并保留其他路由', { skip: !runti
     credentials: {
       describe: async refs => ok(Object.fromEntries(refs.map(ref => [ref, { configured: credential.has(ref), writable: true }]))),
       set: async (ref, value) => { credential.set(ref, value); return ok(undefined) },
+      unset: async ref => { credential.delete(ref); return ok(undefined) },
     },
     llm: { discoverModels: async (_ns, request) => ok(await discovery(request)) },
   }

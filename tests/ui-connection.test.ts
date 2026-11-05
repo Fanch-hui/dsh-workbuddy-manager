@@ -31,6 +31,7 @@ function makeRemote(initial: Record<string, unknown> = {}) {
     credentials: {
       describe: async refs => ok(Object.fromEntries(refs.map(ref => [ref, { configured: stored.has(ref), writable: true }]))),
       set: async (ref, value) => { stored.set(ref, value); return ok(undefined) },
+      unset: async ref => { stored.delete(ref); return ok(undefined) },
     },
     llm: {
       discoverModels: async (ns, request) => {
@@ -91,6 +92,17 @@ test('多个本地网关配置必须由用户明确选择', async () => {
   assert.equal((await loadConnection(app.remote, 'second')).providerId, 'second')
   await assert.rejects(loadConnection(app.remote, 'other'), /不存在/)
   assert.deepEqual(app.writes, [])
+})
+
+test('识别远程 HTTPS 与非默认端口的 WorkBuddy 提供方，不误认其他提供方', async () => {
+  const app = makeRemote({
+    remote: { baseURL: 'https://gateway.example.test/wb/v1', api: 'openai-responses', apiKeyEnv: `WORKBUDDY_MANAGER_KEY_${'A'.repeat(32)}`, models: [] },
+    local: { baseURL: 'http://127.0.0.1:8788/v1', api: 'openai-responses', apiKeyEnv: `WORKBUDDY_MANAGER_KEY_${'B'.repeat(32)}`, models: [] },
+    other: { baseURL: 'https://api.openai.com/v1', api: 'openai-responses', apiKeyEnv: 'OPENAI_API_KEY', models: [] },
+  })
+  const connection = await loadConnection(app.remote)
+  assert.deepEqual(connection.candidates.map(item => item.id).sort(), ['local', 'remote'])
+  assert.equal(connection.providerId, '')
 })
 
 test('新提供方先验证，再分别保存模型配置和凭据', async () => {
@@ -154,7 +166,7 @@ test('使用旧凭据引用恢复旧版 bundle 提供方', async () => {
   assert.equal(app.stored.get('WORKBUDDY_MANAGER_API_KEY'), 'fixture-old')
 })
 
-test('版本冲突不会覆盖配置或写入密钥', async () => {
+test('版本冲突不会留下配置变更或未使用的密钥', async () => {
   const app = makeRemote()
   const connection = await loadConnection(app.remote)
   app.makeConflict()
@@ -163,12 +175,33 @@ test('版本冲突不会覆盖配置或写入密钥', async () => {
   assert.equal(app.stored.size, 0)
 })
 
-test('凭据写入异常时说明模型配置已更新并隐藏密钥', async () => {
+test('配置更新失败且清理失败时如实说明', async () => {
+  const app = makeRemote()
+  app.remote.credentials.unset = async () => ({ ok: false, error: { message: '凭据被占用' } })
+  const connection = await loadConnection(app.remote)
+  app.makeConflict()
+  await assert.rejects(sync(app.remote, connection, connection.url, 'fixture-secret'), /未使用的密钥清理失败：凭据被占用/)
+  assert.equal(app.stored.size, 1)
+})
+
+test('清理凭据异常时如实说明', async () => {
+  const app = makeRemote()
+  app.remote.credentials.unset = async () => { throw new Error('store locked') }
+  const connection = await loadConnection(app.remote)
+  app.makeConflict()
+  await assert.rejects(sync(app.remote, connection, connection.url, 'fixture-secret'), /未使用的密钥清理失败：store locked/)
+})
+
+test('凭据写入失败时模型配置不改动并隐藏密钥', async () => {
   const app = makeRemote()
   app.remote.credentials.set = async () => { throw new Error('fixture-secret rejected') }
   const connection = await loadConnection(app.remote)
-  await assert.rejects(sync(app.remote, connection, connection.url, 'fixture-secret'), /模型配置已更新，但密钥保存失败：\[已隐藏\] rejected/)
-  assert.ok(app.providers()['workbuddy-manager'])
+  await assert.rejects(sync(app.remote, connection, connection.url, 'fixture-secret'), error => {
+    assert.equal((error as Error).message, '密钥保存失败，模型配置未改动：[已隐藏] rejected')
+    return true
+  })
+  assert.deepEqual(app.providers(), {})
+  assert.equal(app.stored.size, 0)
 })
 
 test('连接错误不泄露输入密钥', async () => {

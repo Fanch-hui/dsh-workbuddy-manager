@@ -192,7 +192,7 @@ export function Management({ remote, address, writable, disabled, onBusyChange, 
   const useKey = (key: Key) => run(async () => {
     const ref = newCredentialRef()
     await call({ action: 'useKey', address, id: key.id, ref })
-    try { await onKeySelected(ref) } catch (error) { throw new Error(`密钥已保存，但模型同步失败：${safeMessage(error, '')}`) }
+    try { await onKeySelected(ref) } catch (error) { throw new Error(`用于 DSH 失败：${safeMessage(error, '')}`) }
     setMessage('密钥已安全保存，模型已同步到 DSH。')
   })
 

@@ -155,6 +155,7 @@ dsh-workbuddy models --json --url https://wb.example.com --timeout 20000
 | 现象 | 原因与处理 |
 | --- | --- |
 | 安装被拒绝 / `engines.dsh` 不满足 | 当前 DSH 是 `0.2.1-rc.5`；改用 `@0.2.2-rc.1` 或 `@next` |
+| `ERR_PNPM_UNEXPECTED_STORE` | 当前 profile 的依赖与 pnpm 配置的 store 路径不同。确认报错中 `currently linked from` 的原路径，在该 profile 的 `pnpm-workspace.yaml` 添加 `storeDir` 指向原 store 的父目录（pnpm 11 会自动追加 `v11`），然后重试安装；保留文件中的现有配置 |
 | `MISSING_CREDENTIAL` | `WORKBUDDY_MANAGER_API_KEY` 未配置；检查 `$DSH_HOME/.credentials.yaml` 的 `refs` 分节，或在启动 DSH 时导出 |
 | `INVALID_CREDENTIAL` / HTTP 401 | 密钥错误、被停用或版本不匹配；在面板核对密钥与 `/v1/models` 的返回 |
 | 模型选择器里没有 WorkBuddy Manager | `--dump-config` 确认合成后的 `llm-pi-ai` 行含 `workbuddy-manager`；若你的 profile/home 层覆盖了该行，把 workbuddy-manager 的 provider 块并入那一层 |

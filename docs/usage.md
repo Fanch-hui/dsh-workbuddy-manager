@@ -10,7 +10,7 @@
 
 ## 桌面版安装
 
-1. 从仓库执行 `npm pack`，生成 `dsh-workbuddy-manager-0.3.1.tgz`；发布后也可直接安装对应包名。
+1. 从仓库执行 `npm pack`，生成 `dsh-workbuddy-manager-0.3.2.tgz`；发布后也可直接安装对应包名。
 2. 在 DSH 插件页面添加安装包，确认插件已启用，重启 DSH。
 3. 打开 **设置 → WorkBuddy**。本机网关可填写 `http://127.0.0.1:7864`，插件自动补全 `/v1`；远程网关使用 HTTPS。
 4. 在**管理服务**中使用管理用户名和密码登录。管理员可查看和启停账号、扫码添加账号、查看及启停网关密钥；新建密钥默认不限额度，创建时需要确认。
@@ -22,7 +22,7 @@
 
 插件复用 DSH 自带的 `llm-pi-ai` 和 `openai-responses` 协议，通过设置服务的字段级操作更新 `workbuddy-manager`。已有提供方的 headers、兼容选项和模型设置会保留；不更换密钥时沿用已有引用，其他提供方不会被替换。模型同步只追加新发现的模型，不覆盖或删除已有模型；需要手动调整模型详情时，使用 DSH 原有模型设置。
 
-网关密钥经 DSH 凭据服务保存，配置只记录引用名。留空时沿用已有的 `apiKeyEnv`；输入新密钥或从管理界面选择密钥时，使用新的插件专属凭据引用，不覆盖其他提供方可能共享的凭据。首次创建提供方可在管理区选择密钥，或手动输入密钥后同步。管理登录会话只保存在 DSH 宿主进程的内存中。
+网关密钥经 DSH 凭据服务保存，配置只记录引用名。留空时沿用已有的 `apiKeyEnv`；输入新密钥或从管理界面选择密钥时，使用新的插件专属凭据引用，不覆盖其他提供方可能共享的凭据。首次创建提供方可在管理区选择密钥，或手动输入密钥后同步。管理登录会话保存在 DSH 凭据服务中，按网关地址隔离；不会保存管理密码。打开设置时会自动恢复登录，退出管理或会话失效时清除保存的会话。
 
 插件管理已部署的网关连接；容器或进程仍由 Docker Desktop、Compose 或部署环境的服务管理器启停。
 
@@ -30,7 +30,7 @@
 
 ```sh
 npm pack
-dsh plugin --profile demo add ./dsh-workbuddy-manager-0.3.1.tgz
+dsh plugin --profile demo add ./dsh-workbuddy-manager-0.3.2.tgz
 # 发布后：dsh plugin --profile demo add dsh-workbuddy-manager
 ```
 
@@ -70,7 +70,7 @@ macOS 桌面宿主集成测试使用目标桌面版运行时和临时本地模�
 ELECTRON_RUN_AS_NODE=1 \
 DSH_RUNTIME_ROOT="/Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh" \
 "/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness" \
-  --test tests/desktop-host.test.mjs
+  --expose-internals --test tests/desktop-host.test.mjs tests/desktop-routing.test.mjs tests/desktop-credentials.test.mjs
 ```
 
 普通 `npm test` 在没有 `DSH_RUNTIME_ROOT` 时跳过桌面宿主集成测试。升级 DSH 后应重新核对设置、凭据、模型发现和 `llm-pi-ai` schema 接口，并重跑测试。

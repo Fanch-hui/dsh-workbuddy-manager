@@ -13,8 +13,9 @@ export const managerRequest = z.discriminatedUnion('action', [
   z.object({ action: z.literal('accountDisabled'), address, file: accountFile, disabled: z.boolean() }),
   z.object({ action: z.literal('authStart'), address, realm: z.enum(['cn', 'global']), region: z.string().max(20) }),
   z.object({ action: z.literal('authPoll'), address }),
-  z.object({ action: z.literal('createKey'), address, name: z.string().trim().min(1).max(64), realm: z.enum(['cn', 'global']) }),
+  z.object({ action: z.literal('createKey'), address, name: z.string().trim().min(1).max(64), realm: z.enum(['', 'cn', 'global']).optional() }),
   z.object({ action: z.literal('keyEnabled'), address, id: keyId, enabled: z.boolean() }),
+  z.object({ action: z.literal('renameKey'), address, id: keyId, name: z.string().trim().min(1).max(64) }),
   z.object({ action: z.literal('useKey'), address, id: keyId, ref: z.string().regex(/^WORKBUDDY_MANAGER_KEY_[A-F0-9]{32}$/) }),
 ])
 export type ManagerRequest = z.infer<typeof managerRequest>

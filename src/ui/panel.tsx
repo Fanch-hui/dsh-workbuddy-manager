@@ -3,7 +3,7 @@ import { attachCredential, DEFAULT_URL, discover, loadConnection, safeMessage, s
 import { Management, type AppRemote } from './management.js'
 
 const css = `
-.workbuddy-panel{max-width:720px;color:var(--dsw-alias-label-primary,#242424);display:flex;flex-direction:column;gap:20px}
+.workbuddy-panel{max-width:900px;color:var(--dsw-alias-label-primary,#242424);display:flex;flex-direction:column;gap:16px;text-align:left}
 .workbuddy-panel h2,.workbuddy-panel p{margin:0}.workbuddy-panel h2{font-size:18px;font-weight:600;line-height:26px}
 .workbuddy-panel .wb-muted{color:var(--dsw-alias-label-secondary,#686868);font-size:13px;line-height:20px}
 .workbuddy-panel .wb-card{border:1px solid var(--dsw-alias-settings-card-stroke,#dedede);background:var(--dsw-alias-settings-card-fill,transparent);border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:14px}
@@ -19,7 +19,12 @@ const css = `
 .workbuddy-panel ul{padding-left:20px;margin:0;display:flex;flex-wrap:wrap;gap:6px 24px;font-size:13px}
 .workbuddy-panel h3{margin:0;font-size:15px;line-height:22px}.workbuddy-panel .wb-records{padding:0;list-style:none;display:flex;flex-direction:column;gap:0}
 .workbuddy-panel .wb-records li{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:10px 0;border-bottom:1px solid var(--dsw-alias-border-l3,#dedede)}
-.workbuddy-panel .wb-auth{display:flex;flex-direction:column;gap:12px}.workbuddy-panel img{max-width:100%;height:auto}
+.workbuddy-panel .wb-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.workbuddy-panel .wb-summary>div{display:flex;flex-direction:column;gap:6px;padding:14px 16px;border:1px solid var(--dsw-alias-settings-card-stroke,#dedede);border-radius:10px;background:var(--dsw-alias-settings-card-fill,transparent)}
+.workbuddy-panel .wb-summary span,.workbuddy-panel .wb-summary small{font-size:13px;color:var(--dsw-alias-label-secondary,#686868)}.workbuddy-panel .wb-summary strong{font-size:22px;line-height:28px;font-weight:600}
+.workbuddy-panel .wb-records li{align-items:flex-start;gap:14px;padding:12px 0}.workbuddy-panel .wb-records li:last-child{border-bottom:0}.workbuddy-panel .wb-record-main{min-width:0;flex:1 1 220px}.workbuddy-panel .wb-record-main strong{overflow-wrap:anywhere}.workbuddy-panel .wb-record-main p{margin-top:3px}
+.workbuddy-panel .wb-connection>summary{font-size:14px;font-weight:600;cursor:pointer}.workbuddy-panel .wb-empty{font-size:13px;color:var(--dsw-alias-label-secondary,#686868);padding:8px 0}.workbuddy-panel .wb-details{border-top:1px solid var(--dsw-alias-border-l3,#dedede);padding-top:12px}.workbuddy-panel .wb-details summary{font-size:13px;font-weight:600;cursor:pointer}.workbuddy-panel .wb-detail-body,.workbuddy-panel .wb-rename{display:flex;flex-direction:column;gap:12px;padding-top:12px}.workbuddy-panel img{max-width:100%;height:auto}
+@media(max-width:480px){.workbuddy-panel .wb-summary{grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}.workbuddy-panel .wb-summary>div{padding:10px}.workbuddy-panel .wb-summary strong{font-size:18px}.workbuddy-panel .wb-records li{flex-direction:column}.workbuddy-panel .wb-record-main{flex-basis:auto}}
 `
 
 function installStyles() {
@@ -120,7 +125,11 @@ export function WorkbuddyPanel({ remote }: Props) {
     <div className="wb-card wb-status">
       <div><strong>网关连接</strong><p className="wb-muted" role="status">{status}</p></div>
     </div>
-    <form className="wb-card" onSubmit={event => void save(event)}>
+    {failure && <p className="wb-error" role="alert">{failure}</p>}
+    {message && <p className="wb-success" role="status">{message}</p>}
+    <details className="wb-card wb-connection" open={!connection?.existing || !connection?.keyConfigured}>
+    <summary>连接与模型设置</summary>
+    <form className="wb-detail-body" onSubmit={event => void save(event)}>
       {connection && connection.candidates.length > 1 && <label htmlFor="workbuddy-provider">已有提供方
         <select id="workbuddy-provider" value={connection.providerId} disabled={busy || managementBusy} onChange={event => { if (event.target.value) void load(event.target.value) }}>
           {!connection.providerId && <option value="">请选择提供方</option>}
@@ -136,14 +145,13 @@ export function WorkbuddyPanel({ remote }: Props) {
       </label>
       <p className="wb-muted" id="workbuddy-key-hint">{connection?.keyConfigured ? '密钥已存入 DSH 凭据库，不会显示原文。' : '密钥将保存在 DSH 凭据库中。'}</p>
       {!connection?.writable && connection && <p className="wb-error">当前 DSH 配置不可写，无法同步模型。</p>}
-      {failure && <p className="wb-error" role="alert">{failure}</p>}
-      {message && <p className="wb-success" role="status">{message}</p>}
       <div className="wb-actions">
         <button type="submit" disabled={busy || managementBusy || !connection?.providerId || !connection.writable}>保存并同步模型</button>
         <button type="button" disabled={busy || managementBusy || !connection?.providerId} onClick={() => void check()}>检查连接</button>
         <button type="button" disabled={busy || managementBusy} onClick={() => void load()}>重新载入</button>
       </div>
     </form>
+    </details>
     {connection && <Management key={address} remote={remote} address={address} disabled={busy} writable={connection.writable && connection.keyWritable && Boolean(connection.providerId)} onBusyChange={setManagementBusy} onKeySelected={useManagedKey} />}
     {connection && connection.models.length > 0 && <div className="wb-card">
       <strong>已配置模型 · {connection.models.length}</strong>

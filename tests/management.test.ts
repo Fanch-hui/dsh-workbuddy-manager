@@ -23,8 +23,8 @@ test('管理服务在宿主内登录、操作账号并安全绑定密钥', async
     }
     if (req.headers.cookie !== 'wb_session=fixture-session') { res.statusCode = 401; return res.end('{}') }
     if (req.url === '/api/me') return res.end(JSON.stringify({ role: 'admin' }))
-    if (req.url === '/api/accounts') return res.end(JSON.stringify({ pool_available: true, manageable: true, accounts: [{ file: 'workbuddy-fixture.json', nickname: '测试账号', realm: 'cn', manual_disabled: false, access_token: 'fixture-account-secret' }] }))
-    if (req.url === '/api/keys' && req.method === 'GET') return res.end(JSON.stringify([{ id: 7, name: '测试密钥', enabled: true, prefix: 'fixture-prefix', used_tokens: 3 }]))
+    if (req.url === '/api/accounts') return res.end(JSON.stringify({ pool_available: true, manageable: true, accounts: [{ file: 'workbuddy-fixture.json', nickname: '测试账号', note: '测试备注', realm: 'cn', manual_disabled: false, access_token: 'fixture-account-secret' }] }))
+    if (req.url === '/api/keys' && req.method === 'GET') return res.end(JSON.stringify([{ id: 7, name: '已有名称', realm: '', enabled: true, prefix: 'fixture-prefix', quota: 500, used_tokens: 3, quota_credit: 0, used_credit: 1 }]))
     if (req.url === '/api/keys' && req.method === 'POST') return res.end(JSON.stringify({ id: 8, key: 'fixture-created-secret' }))
     if (req.url === '/api/keys/7/reveal') return res.end(JSON.stringify({ key: 'fixture-gateway-secret' }))
     if (req.url === '/api/auth/start') return res.end(JSON.stringify({ state: 'fixture-private-state', authUrl: 'https://example.test/authorize', realm: 'cn' }))
@@ -36,10 +36,14 @@ test('管理服务在宿主内登录、操作账号并安全绑定密钥', async
   const port = (server.address() as { port: number }).port
   const address = `http://127.0.0.1:${port}/v1`
   const values = new Map<string, string>()
+  const records = new Map<string, unknown>()
   const ctx = new Context()
   ctx.provide('credentials', {
     describe: async (ref: string) => ({ configured: values.has(ref), writable: true }),
     set: async (ref: string, value: string) => { values.set(ref, value) },
+    readRecord: async (key: string) => records.get(key),
+    modifyRecord: async (key: string, update: (value: unknown) => Promise<unknown>) => { const value = await update(records.get(key)); records.set(key, value); return value },
+    deleteRecord: async (key: string) => { records.delete(key) },
   })
   const scope = ctx.plugin(ManagerRemote)
   await scope
@@ -54,11 +58,16 @@ test('管理服务在宿主内登录、操作账号并安全绑定密钥', async
   const overview = await service.manage({ action: 'overview', address })
   assert.equal(JSON.stringify(overview).includes('fixture-account-secret'), false)
   assert.equal(JSON.stringify(overview).includes('fixture-prefix'), false)
-  assert.deepEqual((overview as { accounts: unknown[] }).accounts, [{ file: 'workbuddy-fixture.json', nickname: '测试账号', realm: 'cn', disabled: false, blocked: false, expired: false, inPool: false, cooling: false, credits: null }])
+  assert.deepEqual((overview as { accounts: unknown[] }).accounts, [{ file: 'workbuddy-fixture.json', nickname: '测试账号', note: '测试备注', realm: 'cn', disabled: false, blocked: false, expired: false, inPool: false, cooling: false, credits: null }])
+  assert.deepEqual((overview as { keys: unknown[] }).keys, [{ id: 7, name: '已有名称', realm: '', enabled: true, quota: 500, usedTokens: 3, quotaCredit: 0, usedCredit: 1 }])
   await service.manage({ action: 'accountDisabled', address, file: 'workbuddy-fixture.json', disabled: true })
   assert.deepEqual(requests.at(-1)?.body, { disabled: true })
   assert.deepEqual(await service.manage({ action: 'createKey', address, name: '测试密钥', realm: 'global' }), { ok: true })
   assert.deepEqual(requests.at(-1)?.body, { name: '测试密钥', realm: 'global' })
+  await service.manage({ action: 'createKey', address, name: '默认密钥' })
+  assert.deepEqual(requests.at(-1)?.body, { name: '默认密钥' })
+  await service.manage({ action: 'renameKey', address, id: 7, name: '新名称' })
+  assert.deepEqual(requests.at(-1)?.body, { name: '新名称' })
   assert.deepEqual(await service.manage({ action: 'useKey', address, id: 7, ref: fakeRef }), { ok: true })
   assert.equal(values.get(fakeRef), 'fixture-gateway-secret')
   await assert.rejects(service.manage({ action: 'useKey', address, id: 7, ref: fakeRef }), /已被占用/)

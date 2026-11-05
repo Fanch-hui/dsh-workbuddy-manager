@@ -32,6 +32,7 @@ test('桌面 RPC 路由随插件加载并连接管理服务', { skip: !runtime, 
   const ctx = new Context()
   ctx.baseUrl = pathToFileURL(join(root, 'package.json')).href
   ctx.provide('remoteAccess', { decide: () => ({ kind: 'allow' }) })
+  ctx.provide('credentials', { readRecord: async () => undefined, modifyRecord: async () => undefined, deleteRecord: async () => {} })
   const loader = ctx.plugin(Loader, { baseUrl: ctx.baseUrl })
   const registry = ctx.plugin(TypertRegistry)
   const connection = ctx.plugin({

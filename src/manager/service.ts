@@ -2,6 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { Remote, RemoteError, TypertRemoteService, principalOf } from '@deepseek-ai/dsh-typert-protocol'
 import { managementURL } from '../address.js'
 import { managerRequest, type ManagerRequest } from './contract.js'
+import { SessionStore, validSession, type SessionCredentials } from './session-store.js'
 
 type Dict = Record<string, unknown>
 type CredentialSink = { describe(ref: string): Promise<{ configured: boolean; writable: boolean }>; set(ref: string, value: string): Promise<void> }
@@ -14,9 +15,15 @@ function fail(message: string): never { throw new RemoteError('gateway/bad-reque
 function text(value: unknown): string { return typeof value === 'string' ? value : '' }
 function number(value: unknown): number | null { return typeof value === 'number' && Number.isFinite(value) ? value : null }
 
-/** Holds Manager sessions only in host memory and exposes a fixed set of operations. */
+class SessionExpiredError extends RemoteError {
+  constructor() { super('gateway/bad-request', '登录已失效，请重新登录。', {}) }
+}
+
+/** Keeps management sessions in the host credential provider and exposes fixed operations. */
 export class ManagerRemote extends TypertRemoteService {
   private readonly sessions = new Map<string, string>()
+  private readonly operations = new Map<string, Promise<void>>()
+  private readonly sessionStore = new SessionStore(() => this.ctx.get('credentials' as never) as unknown as SessionCredentials | undefined)
   private readonly pending = new Map<string, { state: string; realm: string; region: string }>()
 
   constructor(ctx: Context) { super(ctx, 'workbuddyManager', { namespace: 'workbuddy' }) }
@@ -29,7 +36,12 @@ export class ManagerRemote extends TypertRemoteService {
     if (!request.success) fail('管理请求格式无效。')
     let base: string
     try { base = managementURL(request.data.address) } catch { fail('管理服务地址无效。') }
-    return this.dispatch(base, request.data)
+    // A prior renewal must settle before logout removes the stored session.
+    const previous = this.operations.get(base) ?? Promise.resolve()
+    const operation = previous.then(() => this.dispatch(base, request.data))
+    const settled = operation.then(() => undefined, () => undefined)
+    this.operations.set(base, settled)
+    try { return await operation } finally { if (this.operations.get(base) === settled) this.operations.delete(base) }
   }
 
   private async dispatch(base: string, request: ManagerRequest): Promise<unknown> {
@@ -44,37 +56,51 @@ export class ManagerRemote extends TypertRemoteService {
       case 'authStart': return this.authStart(base, request.realm, request.region)
       case 'authPoll': return this.authPoll(base)
       case 'createKey':
-        await this.request(base, '/api/keys', 'POST', { name: request.name, realm: request.realm })
+        await this.request(base, '/api/keys', 'POST', { name: request.name, ...(request.realm ? { realm: request.realm } : {}) })
         return { ok: true }
       case 'keyEnabled':
         await this.request(base, `/api/keys/${request.id}`, 'PATCH', { enabled: request.enabled })
+        return { ok: true }
+      case 'renameKey':
+        await this.request(base, `/api/keys/${request.id}`, 'PATCH', { name: request.name })
         return { ok: true }
       case 'useKey': return this.useKey(base, request.id, request.ref)
     }
   }
 
+  private async savedSession(base: string): Promise<string | undefined> {
+    const current = this.sessions.get(base)
+    if (current) return current
+    const saved = await this.sessionStore.read(base)
+    if (saved) this.sessions.set(base, saved)
+    return saved
+  }
+
   private async health(base: string): Promise<unknown> {
     const reply = object(await this.request(base, '/api/healthz', 'GET', undefined, false))
     if (reply.ok !== true || reply.service !== 'workbuddy-manager') fail('该地址不是 WorkBuddy Manager 服务。')
-    if (!this.sessions.has(base)) return { online: true, authenticated: false }
+    if (!await this.savedSession(base)) return { online: true, authenticated: false }
     try {
       const user = object(await this.request(base, '/api/me', 'GET'))
       return { online: true, authenticated: true, role: text(user.role) }
     } catch (error) {
-      if (!this.sessions.has(base)) return { online: true, authenticated: false }
+      if (error instanceof SessionExpiredError) return { online: true, authenticated: false }
       throw error
     }
   }
 
   private async login(base: string, username: string, password: string): Promise<unknown> {
+    this.sessions.delete(base)
     const reply = object(await this.request(base, '/api/login', 'POST', { username, password }, false))
-    if (reply.ok !== true || !this.sessions.has(base)) fail('管理服务未建立登录会话。')
+    const session = this.sessions.get(base)
+    if (reply.ok !== true || !session) fail('管理服务未建立登录会话。')
+    try { await this.sessionStore.save(base, session) } catch (error) { this.sessions.delete(base); throw error }
     return { ok: true, role: text(reply.role) }
   }
 
   private async logout(base: string): Promise<unknown> {
-    try { if (this.sessions.has(base)) await this.request(base, '/api/logout', 'POST') }
-    finally { this.sessions.delete(base); this.pending.delete(base) }
+    try { if (await this.savedSession(base)) await this.request(base, '/api/logout', 'POST') }
+    finally { this.sessions.delete(base); this.pending.delete(base); await this.sessionStore.clear(base) }
     return { ok: true }
   }
 
@@ -86,7 +112,7 @@ export class ManagerRemote extends TypertRemoteService {
     const accounts = Array.isArray(pool.accounts) ? pool.accounts.map(item => {
       const account = object(item)
       return {
-        file: text(account.file), nickname: text(account.nickname), realm: text(account.realm),
+        file: text(account.file), nickname: text(account.nickname), note: text(account.note), realm: text(account.realm),
         disabled: account.disabled_by_panel === true || account.manual_disabled === true,
         blocked: account.disabled === true, expired: account.is_expired === true,
         inPool: account.in_pool === true, cooling: account.cooling === true,
@@ -95,7 +121,7 @@ export class ManagerRemote extends TypertRemoteService {
     }) : []
     const keys = Array.isArray(keyData) ? keyData.map(item => {
       const key = object(item)
-      return { id: number(key.id), name: text(key.name), realm: text(key.realm), enabled: key.enabled === true, usedTokens: number(key.used_tokens), usedCredit: number(key.used_credit) }
+      return { id: number(key.id), name: text(key.name), realm: text(key.realm), enabled: key.enabled === true, quota: number(key.quota), usedTokens: number(key.used_tokens), quotaCredit: number(key.quota_credit), usedCredit: number(key.used_credit) }
     }).filter(item => item.id !== null) : []
     return { accounts, keys, poolAvailable: pool.pool_available === true, manageable: pool.manageable === true }
   }
@@ -136,7 +162,7 @@ export class ManagerRemote extends TypertRemoteService {
   }
 
   private async request(base: string, path: string, method: string, body?: object, authenticated = true): Promise<unknown> {
-    const session = this.sessions.get(base)
+    const session = authenticated ? await this.savedSession(base) : undefined
     if (authenticated && !session) fail('请先登录 WorkBuddy 管理服务。')
     let response: Response
     try {
@@ -146,10 +172,20 @@ export class ManagerRemote extends TypertRemoteService {
         ...(body ? { body: JSON.stringify(body) } : {}),
       })
     } catch { fail('无法连接 WorkBuddy 管理服务，请检查服务状态和地址。') }
-    if (response.ok && (authenticated || path === '/api/login')) for (const cookie of response.headers.getSetCookie()) {
-      if (cookie.startsWith('wb_session=') && !cookie.startsWith('wb_session=;')) this.sessions.set(base, cookie.split(';', 1)[0])
+    if (response.status === 401) {
+      if (!authenticated) fail('用户名或密码不正确。')
+      this.sessions.delete(base)
+      await this.sessionStore.clear(base)
+      throw new SessionExpiredError()
     }
-    if (response.status === 401) { if (authenticated) this.sessions.delete(base); fail('登录已失效或用户名、密码不正确。') }
+    if (response.ok && (authenticated || path === '/api/login')) for (const cookie of response.headers.getSetCookie()) {
+      const next = cookie.split(';', 1)[0]
+      if (!validSession(next) || next === session) continue
+      this.sessions.set(base, next)
+      if (authenticated) {
+        try { await this.sessionStore.save(base, next) } catch { fail('操作已完成，但无法保存更新后的管理会话。') }
+      }
+    }
     if (response.status === 429) fail('登录尝试过多，请稍后再试。')
     if (response.status === 409 && path.endsWith('/reveal')) fail('旧密钥无法取回，请创建新的网关密钥。')
     if (response.status === 409) fail('管理服务无法完成该操作，请检查目标状态。')

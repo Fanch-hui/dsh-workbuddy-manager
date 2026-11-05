@@ -80,6 +80,7 @@ test('桌面宿主同步真实模型发现并保留其他路由', { skip: !runti
     const host = new Context()
     host.provide('typert', { local: { get: endpoint => endpoint === 'workbuddy/manage' ? descriptor : undefined, hasSeen: () => false }, resources: { entries: () => [] } })
     host.provide('remoteAccess', { decide: () => ({ kind: 'allow' }) })
+    host.provide('credentials', { readRecord: async () => undefined, modifyRecord: async () => undefined, deleteRecord: async () => {} })
     const managerScope = host.plugin(ManagerRemote)
     const gatewayScope = host.plugin(TypertGatewayService, TypertGatewayService.Config({}))
     await Promise.all([managerScope, gatewayScope])

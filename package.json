@@ -1,6 +1,6 @@
 {
   "name": "dsh-workbuddy-manager",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "接入 WorkBuddy Manager 账号池网关的 DeepSeek Harness 插件（DSH 0.2.2-rc.1）",
   "type": "module",
   "license": "MIT",
@@ -18,6 +18,10 @@
       "types": "./lib/client.d.ts",
       "node": "./lib/client.js",
       "default": "./lib/ui-bundle.js"
+    },
+    "./typert": {
+      "types": "./lib/manager/contract.d.ts",
+      "default": "./lib/manager/contract.js"
     },
     "./package.json": "./package.json"
   },
@@ -53,8 +57,10 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@types/qrcode": "1.5.6",
     "@types/react": "^18.3.31",
     "esbuild": "^0.25.12",
+    "qrcode": "1.5.4",
     "react": "^18.3.1",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0",
@@ -66,5 +72,10 @@
     "dsh-bundle",
     "workbuddy-manager",
     "openai-responses"
-  ]
+  ],
+  "dependencies": {
+    "@deepseek-ai/cordis": "4.1.0",
+    "@deepseek-ai/dsh-typert-protocol": "0.2.2-rc.1",
+    "zod": "4.6.7"
+  }
 }

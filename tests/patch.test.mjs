@@ -34,7 +34,7 @@ test('Node 包入口保留原客户端接口', async () => {
   assert.equal(typeof rootEntry.apply, 'function')
 })
 
-test('客户端构建产物注册独立设置页面', () => {
+test('客户端构建产物挂载管理接口并注册设置页面', async () => {
   const code = readFileSync(join(root, 'lib/ui-bundle.js'), 'utf8')
   let module
   const window = { __ModuleLoader__: { load(spec) { module = spec } } }
@@ -42,18 +42,23 @@ test('客户端构建产物注册独立设置页面', () => {
   assert.equal(module.id, 'dsh-workbuddy-manager')
   const plugin = module.factory(createRequire(import.meta.url))
   let registration
+  let contribution
+  let unmounted = false
   const ctx = {
-    remote: {},
+    remote: { $mount: async value => { contribution = value; return async () => { unmounted = true } } },
     slots: {
       inject(name, fn) { assert.equal(name, 'settings.section'); fn() },
       register(options, component) { registration = { options, component } },
     },
   }
-  plugin.apply(ctx)
+  const dispose = await plugin.apply(ctx)
+  assert.equal(contribution.descriptors[0].id, 'dsh-workbuddy-manager#workbuddy/manage')
   assert.equal(registration.options.id, 'workbuddy-manager')
   assert.equal(registration.options.label(), 'WorkBuddy')
   assert.equal(registration.options.inject().remote, ctx.remote)
   assert.equal(typeof registration.component, 'function')
+  await dispose()
+  assert.equal(unmounted, true)
 })
 
 test('配置里出现明文密钥时拒绝打包', () => {

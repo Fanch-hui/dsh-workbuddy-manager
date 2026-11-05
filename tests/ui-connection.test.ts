@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { discover, loadConnection, managementURL, mergeModels, normalizeURL, sync, type Remote } from '../src/ui/connection.js'
+import { attachCredential, discover, loadConnection, managementURL, mergeModels, normalizeURL, sync, type Remote } from '../src/ui/connection.js'
 
 const ok = <T>(value: T) => ({ ok: true as const, value })
 
@@ -64,17 +64,94 @@ test('插件内同步保留已有提供方、模型配置和密钥引用', async
   assert.equal(app.stored.get('EXISTING_KEY'), 'fixture-value')
 })
 
+test('识别本地网关已有提供方并保留其标识和高级配置', async () => {
+  const app = makeRemote({
+    mine: { baseURL: 'http://localhost:7864/v1', api: 'openai-responses', apiKeyEnv: 'OLD_REF', models: [{ id: 'old-model' }], compat: { supportsMaxOutputTokens: false } },
+    other: { api: 'anthropic-messages', models: [{ id: 'untouched' }] },
+  })
+  app.stored.set('OLD_REF', 'fixture-value')
+  const connection = await loadConnection(app.remote)
+  assert.equal(connection.providerId, 'mine')
+  assert.equal(connection.keyConfigured, true)
+  assert.equal(await sync(app.remote, connection, connection.url, ''), 2)
+  assert.equal((app.probes[0] as { request: { provider: string } }).request.provider, 'mine')
+  assert.equal(app.providers()['workbuddy-manager'], undefined)
+  assert.deepEqual((app.providers().mine as Record<string, unknown>).compat, { supportsMaxOutputTokens: false })
+  assert.deepEqual(app.providers().other, { api: 'anthropic-messages', models: [{ id: 'untouched' }] })
+})
+
+test('多个本地网关配置必须由用户明确选择', async () => {
+  const app = makeRemote({
+    first: { baseURL: 'http://127.0.0.1:7864/v1', api: 'openai-responses', models: [] },
+    second: { baseURL: 'http://localhost:7864/v1', api: 'openai-responses', models: [] },
+  })
+  const connection = await loadConnection(app.remote)
+  assert.equal(connection.providerId, '')
+  await assert.rejects(discover(app.remote, connection, connection.url, 'fixture-value'), /请先选择/)
+  assert.equal((await loadConnection(app.remote, 'second')).providerId, 'second')
+  await assert.rejects(loadConnection(app.remote, 'other'), /不存在/)
+  assert.deepEqual(app.writes, [])
+})
+
 test('新提供方先验证，再分别保存模型配置和凭据', async () => {
   const app = makeRemote({ other: { models: [{ id: 'existing' }] } })
   const connection = await loadConnection(app.remote)
   const key = 'fixture-secret'
   assert.equal(await sync(app.remote, connection, 'http://127.0.0.1:7864', key), 2)
-  assert.equal(app.stored.get('WORKBUDDY_MANAGER_API_KEY'), key)
   assert.equal(JSON.stringify(app.writes).includes(key), false)
   assert.deepEqual(app.providers().other, { models: [{ id: 'existing' }] })
   const provider = app.providers()['workbuddy-manager'] as Record<string, unknown>
-  assert.equal(provider.apiKeyEnv, 'WORKBUDDY_MANAGER_API_KEY')
+  assert.match(provider.apiKeyEnv as string, /^WORKBUDDY_MANAGER_KEY_[A-F0-9]{32}$/)
+  assert.equal(app.stored.get(provider.apiKeyEnv as string), key)
   assert.equal(provider.baseURL, 'http://127.0.0.1:7864/v1')
+  assert.deepEqual(provider.compat, { supportsMaxOutputTokens: false })
+})
+
+test('手动更换密钥不覆盖其他提供方的共享凭据', async () => {
+  const app = makeRemote({
+    other: { apiKeyEnv: 'SHARED_KEY', models: [] },
+    'workbuddy-manager': { baseURL: 'http://127.0.0.1:7864/v1', api: 'openai-responses', apiKeyEnv: 'SHARED_KEY', models: [] },
+  })
+  app.stored.set('SHARED_KEY', 'fixture-old')
+  const connection = await loadConnection(app.remote)
+  await sync(app.remote, connection, connection.url, 'fixture-new')
+  const nextRef = (app.providers()['workbuddy-manager'] as Record<string, unknown>).apiKeyEnv as string
+  assert.match(nextRef, /^WORKBUDDY_MANAGER_KEY_[A-F0-9]{32}$/)
+  assert.equal(app.stored.get(nextRef), 'fixture-new')
+  assert.equal(app.stored.get('SHARED_KEY'), 'fixture-old')
+  assert.equal((app.providers().other as Record<string, unknown>).apiKeyEnv, 'SHARED_KEY')
+})
+
+test('管理密钥绑定保留其他提供方和已有凭据', async () => {
+  const app = makeRemote({
+    other: { apiKeyEnv: 'SHARED_KEY', models: [{ id: 'untouched' }] },
+    'workbuddy-manager': { baseURL: 'http://127.0.0.1:7864/v1', api: 'openai-responses', apiKeyEnv: 'SHARED_KEY', models: [], headers: { X: 'keep' } },
+  })
+  app.stored.set('SHARED_KEY', 'fixture-old')
+  app.stored.set('WORKBUDDY_MANAGER_KEY_FRESH', 'fixture-new')
+  const connection = await loadConnection(app.remote)
+  const updated = await attachCredential(app.remote, connection, connection.url, 'WORKBUDDY_MANAGER_KEY_FRESH')
+  assert.equal(await sync(app.remote, updated, connection.url, ''), 2)
+  assert.equal((app.providers()['workbuddy-manager'] as Record<string, unknown>).apiKeyEnv, 'WORKBUDDY_MANAGER_KEY_FRESH')
+  assert.deepEqual((app.providers()['workbuddy-manager'] as Record<string, unknown>).headers, { X: 'keep' })
+  assert.deepEqual(app.providers().other, { apiKeyEnv: 'SHARED_KEY', models: [{ id: 'untouched' }] })
+  assert.equal(app.stored.get('SHARED_KEY'), 'fixture-old')
+})
+
+test('使用旧凭据引用恢复旧版 bundle 提供方', async () => {
+  const app = makeRemote({ other: { models: [{ id: 'untouched' }] } })
+  app.stored.set('WORKBUDDY_MANAGER_API_KEY', 'fixture-old')
+  const connection = await loadConnection(app.remote)
+  assert.equal(connection.existing, false)
+  assert.equal(connection.keyConfigured, true)
+  assert.equal(await sync(app.remote, connection, connection.url, ''), 2)
+  assert.deepEqual(app.providers().other, { models: [{ id: 'untouched' }] })
+  const restored = app.providers()['workbuddy-manager'] as Record<string, unknown>
+  assert.equal(restored.apiKeyEnv, 'WORKBUDDY_MANAGER_API_KEY')
+  assert.deepEqual(restored.compat, { supportsMaxOutputTokens: false })
+  assert.equal(restored.defaultContextWindow, 131072)
+  assert.equal(restored.defaultMaxTokens, 32768)
+  assert.equal(app.stored.get('WORKBUDDY_MANAGER_API_KEY'), 'fixture-old')
 })
 
 test('版本冲突不会覆盖配置或写入密钥', async () => {

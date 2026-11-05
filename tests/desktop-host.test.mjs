@@ -35,6 +35,11 @@ test('桌面宿主同步真实模型发现并保留其他路由', { skip: !runti
     const parts = []
     for await (const part of req) parts.push(part)
     requests.push({ path: req.url, auth: req.headers.authorization, body: parts.length ? JSON.parse(Buffer.concat(parts).toString()) : undefined })
+    if (req.url === '/api/healthz') {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, service: 'workbuddy-manager' }))
+      return
+    }
     if (req.url === '/v1/models') {
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ object: 'list', data: [{ id: 'glm-test', object: 'model' }] }))
@@ -64,6 +69,33 @@ test('桌面宿主同步真实模型发现并保留其他路由', { skip: !runti
   await new Promise(done => server.listen(0, '127.0.0.1', done))
   t.after(() => new Promise(done => server.close(done)))
   const baseURL = `http://127.0.0.1:${server.address().port}/v1`
+  {
+    const { validateTypertManifest } = await load('dsh-typert-loader/lib/index.js')
+    const { TypertGatewayService } = await load('dsh-api-gateway/lib/index.js')
+    const { Context } = await load('cordis/lib/index.js')
+    const { TYPERT } = await import('../lib/manager/contract.js')
+    const { ManagerRemote } = await import('../lib/manager/service.js')
+    validateTypertManifest('dsh-workbuddy-manager', TYPERT)
+    const descriptor = TYPERT.invocations[0]
+    const host = new Context()
+    host.provide('typert', { local: { get: endpoint => endpoint === 'workbuddy/manage' ? descriptor : undefined, hasSeen: () => false }, resources: { entries: () => [] } })
+    host.provide('remoteAccess', { decide: () => ({ kind: 'allow' }) })
+    const managerScope = host.plugin(ManagerRemote)
+    const gatewayScope = host.plugin(TypertGatewayService, TypertGatewayService.Config({}))
+    await Promise.all([managerScope, gatewayScope])
+    try {
+      const gateway = host.get('typertGateway')
+      const peer = { principal: { kind: 'owner' }, signal: new AbortController().signal }
+      const request = { namespace: 'workbuddy', method: 'manage', args: { request: { action: 'health', address: baseURL } }, peer }
+      assert.deepEqual(await gateway.invoke(request), { online: true, authenticated: false })
+      await assert.rejects(gateway.invoke({ ...request, peer: { ...peer, principal: { kind: 'guest', id: 'fixture' } } }), /只有 DSH 所有者/)
+      await assert.rejects(gateway.invoke({ ...request, args: { request: { action: 'health', address: 123 } } }), /invalid|decode|codec|request/i)
+    } finally {
+      await gatewayScope.dispose()
+      await managerScope.dispose()
+    }
+    requests.length = 0
+  }
   let providers = { other: { api: 'openai-responses', baseURL, apiKeyEnv: 'OTHER_KEY', models: [{ id: 'other-model' }] } }
   let resolved = Config({ providers }).providers.get()
   const credential = new Map()
@@ -116,9 +148,9 @@ test('桌面宿主同步真实模型发现并保留其他路由', { skip: !runti
   assert.equal(await sync(remote, connection, baseURL, 'fixture-key'), 1)
   assert.deepEqual(registration.routes, ['other', 'workbuddy-manager'])
   assert.deepEqual(providers.other.models, [{ id: 'other-model' }])
-  assert.equal(providers['workbuddy-manager'].apiKeyEnv, 'WORKBUDDY_MANAGER_API_KEY')
+  assert.match(providers['workbuddy-manager'].apiKeyEnv, /^WORKBUDDY_MANAGER_KEY_[A-F0-9]{32}$/)
   assert.equal(JSON.stringify(providers).includes('fixture-key'), false)
-  assert.equal(credential.get('WORKBUDDY_MANAGER_API_KEY'), 'fixture-key')
+  assert.equal(credential.get(providers['workbuddy-manager'].apiKeyEnv), 'fixture-key')
 
   providers['workbuddy-manager'].headers = { 'X-Custom': 'preserve' }
   providers['workbuddy-manager'].models[0].name = '自定义名称'

@@ -1,19 +1,20 @@
 # dsh-workbuddy-manager
 
-在 DeepSeek Harness 中管理 [WorkBuddy Manager](https://github.com/ithtelab/workbuddy-manager) 网关连接：检查服务状态、安全保存网关密钥，并将可用模型同步到 DSH 模型选择器。
+在 DeepSeek Harness 中管理已部署的 [WorkBuddy Manager](https://github.com/ithtelab/workbuddy-manager)：登录管理服务、扫码添加账号、启停账号及网关密钥，并将模型同步到 DSH。
 
 ## 安装与使用
 
 需要 DSH `0.2.2-rc.1` 和已运行的 WorkBuddy Manager 服务。
 
-1. 在 WorkBuddy Manager 管理页面创建网关密钥，并确认该密钥允许使用的模型。
-2. 在 DSH 的**插件**页面安装并启用本插件；从源码构建时可先执行 `npm pack`，再选择生成的安装包。
-3. 打开 DSH **设置 → WorkBuddy**，填写网关地址和密钥，点击**保存并同步模型**。本机默认地址是 `http://127.0.0.1:7864`，非本机网关使用 HTTPS。
-4. 在对话的模型选择器中选择 WorkBuddy Manager 下的模型。需要管理账号或网关密钥时，点击插件中的**打开管理页面**。
+1. 在 DSH 的**插件**页面安装并启用本插件；从源码构建时可先执行 `npm pack`，再选择生成的安装包，然后重启 DSH。
+2. 打开 DSH **设置 → WorkBuddy**。本机默认地址为 `http://127.0.0.1:7864`，远程服务使用 HTTPS。
+3. 使用 WorkBuddy Manager 的管理用户名和密码登录，在插件内查看账号、扫码添加账号，以及创建或启停网关密钥。
+4. 选择网关密钥的**用于 DSH**，插件将安全保存该密钥并同步模型。也可手动输入网关密钥后点击**保存并同步模型**。
+5. 在对话的模型选择器中选择 WorkBuddy Manager 下的模型。
 
-插件通过 DSH 凭据服务保存密钥，模型通过 DSH 官方 `llm-pi-ai` 适配器调用。已有 WorkBuddy 提供方会保留密钥引用、模型设置及高级选项；其他提供方不受影响。同步会添加新发现的模型，已有模型不会被删除或覆盖。
+管理会话只保存在当前 DSH 宿主进程中；网关密钥通过 DSH 凭据服务保存。同步只修改所选 WorkBuddy 提供方并追加新模型，保留其他提供方和已有模型设置。管理密钥新建时默认不限额度，创建前请确认。
 
-网关服务由现有部署方式管理；插件显示连接状态并提供管理页面入口。
+网关进程或容器仍由现有部署方式启停。
 
 ## 只读命令行
 

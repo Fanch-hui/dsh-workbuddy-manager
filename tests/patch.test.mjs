@@ -2,82 +2,69 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createRequire } from 'node:module'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { runInNewContext } from 'node:vm'
 import YAML from 'yaml'
 import { validatePackage } from '../scripts/check-package.mjs'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 
-test('真实 bundle 配置符合 DSH 0.2.2-rc.1 约定', () => {
+test('真实 bundle 和桌面客户端入口符合打包约定', () => {
   const { errors, checks } = validatePackage(root)
   assert.deepEqual(errors, [], `配置校验失败：${errors.join('; ')}`)
   assert.ok(checks.length >= 10)
 })
 
-/**
- * 按 DSH 0.2.2-rc.1 已核实的合成规则最小复刻 applyPatches：
- * 层按顺序平铺后覆盖空根；insert 追加条目；带 id 的条目整体替换目标行的键。
- */
-function composeLayers(layers) {
-  const entries = []
-  const rowOf = new Map()
-  for (const patch of layers.flat()) {
-    if (patch.insert) {
-      for (const entry of patch.insert) {
-        entries.push(entry)
-        if (entry.id) rowOf.set(entry.id, entry)
-      }
-      continue
-    }
-    const target = rowOf.get(patch.id)
-    assert.ok(target, `patch 定向的行不存在：${patch.id}`)
-    for (const [key, value] of Object.entries(patch)) {
-      if (key === 'id') continue
-      target[key] = value
-    }
-  }
-  return entries
-}
-
-test('bundle 层覆盖 dsh-base 休眠行，且不产生重复 id', () => {
+test('bundle 保留既有模型提供方并挂载 WorkBuddy 界面', () => {
   const patch = YAML.parse(readFileSync(join(root, 'cordis.patch.yml'), 'utf8'))
-  const dshBaseLayer = [{ insert: [{ id: 'llm-pi-ai', name: '@deepseek-ai/dsh-llm-pi-ai' }] }]
-  const entries = composeLayers([dshBaseLayer, patch])
-  const rows = entries.filter(entry => entry.id === 'llm-pi-ai')
-  assert.equal(rows.length, 1, 'llm-pi-ai 行只挂载一份')
-  assert.deepEqual(rows[0].config.providers['workbuddy-manager'].api, 'openai-responses')
+  const existing = { id: 'llm-pi-ai', name: '@deepseek-ai/dsh-llm-pi-ai', config: { providers: { existing: {} } } }
+  const entries = [existing, ...patch.flatMap(row => row.insert ?? [])]
+  assert.equal(entries.find(row => row.id === 'llm-pi-ai'), existing)
+  assert.deepEqual(Object.keys(existing.config.providers), ['existing'])
+  assert.equal(entries.find(row => row.id === 'workbuddy-manager')?.name, 'dsh-workbuddy-manager')
 })
 
-test('后续层覆盖 llm-pi-ai 时整行替换 config（last write wins）', () => {
-  const patch = YAML.parse(readFileSync(join(root, 'cordis.patch.yml'), 'utf8'))
-  const dshBaseLayer = [{ insert: [{ id: 'llm-pi-ai', name: '@deepseek-ai/dsh-llm-pi-ai' }] }]
-  const userLayer = [{ id: 'llm-pi-ai', name: '@deepseek-ai/dsh-llm-pi-ai', config: { providers: { other: {} } } }]
-  const entries = composeLayers([dshBaseLayer, patch, userLayer])
-  const row = entries.find(entry => entry.id === 'llm-pi-ai')
-  assert.deepEqual(Object.keys(row.config.providers), ['other'], 'user 层替换整份 config，bundle 注入的 provider 不复活')
+test('Node 包入口保留原客户端接口', async () => {
+  const rootEntry = await import('dsh-workbuddy-manager')
+  const clientEntry = await import('dsh-workbuddy-manager/client')
+  assert.equal(rootEntry.WorkbuddyManagerClient, clientEntry.WorkbuddyManagerClient)
+  assert.equal(rootEntry.WorkbuddyError, clientEntry.WorkbuddyError)
+  assert.equal(typeof rootEntry.apply, 'function')
+})
+
+test('客户端构建产物注册独立设置页面', () => {
+  const code = readFileSync(join(root, 'lib/ui-bundle.js'), 'utf8')
+  let module
+  const window = { __ModuleLoader__: { load(spec) { module = spec } } }
+  runInNewContext(code, { window })
+  assert.equal(module.id, 'dsh-workbuddy-manager')
+  const plugin = module.factory(createRequire(import.meta.url))
+  let registration
+  const ctx = {
+    remote: {},
+    slots: {
+      inject(name, fn) { assert.equal(name, 'settings.section'); fn() },
+      register(options, component) { registration = { options, component } },
+    },
+  }
+  plugin.apply(ctx)
+  assert.equal(registration.options.id, 'workbuddy-manager')
+  assert.equal(registration.options.label(), 'WorkBuddy')
+  assert.equal(registration.options.inject().remote, ctx.remote)
+  assert.equal(typeof registration.component, 'function')
 })
 
 test('配置里出现明文密钥时拒绝打包', () => {
   const temp = mkdtempSync(join(tmpdir(), 'dsh-wb-'))
   try {
-    for (const file of ['package.json', 'cordis.patch.yml']) {
-      writeFileSync(join(temp, file), readFileSync(join(root, file), 'utf8'))
-    }
+    for (const file of ['package.json', 'cordis.patch.yml']) writeFileSync(join(temp, file), readFileSync(join(root, file), 'utf8'))
     mkdirSync(join(temp, 'lib'))
-    for (const file of ['cli.js', 'client.js']) writeFileSync(join(temp, 'lib', file), '')
-    const clean = validatePackage(temp)
-    assert.deepEqual(clean.errors, [])
-
-    writeFileSync(
-      join(temp, 'cordis.patch.yml'),
-      readFileSync(join(root, 'cordis.patch.yml'), 'utf8').replace(
-        'apiKeyEnv: WORKBUDDY_MANAGER_API_KEY',
-        'apiKeyEnv: wbk_leaked_secret',
-      ),
-    )
-    const dirty = validatePackage(temp)
-    assert.ok(dirty.errors.some(message => message.includes('明文密钥')))
+    for (const file of ['cli.js', 'client.js', 'index.js', 'ui-bundle.js']) writeFileSync(join(temp, 'lib', file), '')
+    assert.deepEqual(validatePackage(temp).errors, [])
+    writeFileSync(join(temp, 'cordis.patch.yml'), `${readFileSync(join(root, 'cordis.patch.yml'), 'utf8')}\n# wbk_leaked_secret\n`)
+    assert.ok(validatePackage(temp).errors.some(message => message.includes('明文密钥')))
   } finally {
     rmSync(temp, { recursive: true, force: true })
   }

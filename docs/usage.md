@@ -1,187 +1,70 @@
 # 安装、配置与排障
 
-本文件不随插件包分发，是仓库内的完整说明。
+本文件是仓库内的完整使用说明，不随插件包分发。
 
-## 1. 版本基线
+## 环境
 
-| 项 | 值 |
-| --- | --- |
-| DSH | `0.2.2-rc.1`（2026-11-04 发布，`next` 标签） |
-| `engines.dsh` | `>=0.2.2-rc.1 <0.3.0` |
-| Cordis / pi-ai | `4.1.0` / `1.3.0` |
-| DSH 宿主 Node | ≥24.9（插件 CLI 自身兼容 ≥22） |
+- DSH `0.2.2-rc.1`；插件的 `engines.dsh` 为 `>=0.2.2-rc.1 <0.3.0`。DSH 宿主要求 Node ≥24.9。
+- 已部署并启动 [WorkBuddy Manager](https://github.com/ithtelab/workbuddy-manager)，默认管理地址为 `http://127.0.0.1:7864`。
+- 已在管理页面创建网关密钥，并给该密钥配置所需的模型权限。
 
-DSH 目前**没有 stable 版**：`npm latest` 仍指向 `0.2.1-rc.5`，`next` 才是 `0.2.2-rc.1`。启动请用 `npx @deepseek-ai/dsh@0.2.2-rc.1` 或 `@next`，否则 `engines.dsh` 会在安装/启动时拒绝本 bundle。
+## 桌面版安装
 
-`0.2.2-rc.1` 的破坏性变更集中在 `agent.model`、tools 配置 overlay、Session Projection 异步化等；本插件是**配置层 bundle**，不注册适配器、不调用这些 API，因此不受影响。升级 DSH 时仍应复核 `@deepseek-ai/dsh-llm-pi-ai` 的 provider schema 是否有字段变化。
+1. 从仓库执行 `npm pack`，生成 `dsh-workbuddy-manager-0.2.0.tgz`；发布后也可直接安装对应包名。
+2. 在 DSH 侧栏的插件页面添加安装包，确认插件已启用，然后刷新页面。
+3. 打开 **设置 → WorkBuddy**。本机网关可填写 `http://127.0.0.1:7864`，插件自动补全 `/v1`；远程网关使用 HTTPS。
+4. 填写在管理页面创建的网关密钥，点击 **保存并同步模型**。插件会先查询可用模型，再写入 DSH 配置和凭据服务。
+5. 在对话模型选择器选择 WorkBuddy Manager 的模型。插件页面会检查连接状态；账号、密钥和配额由 **打开管理页面** 进入原管理界面操作。
 
-## 2. 前置条件
+从 `0.1.0` 升级时，如果之前的 WorkBuddy 路由仅来自旧版 bundle，请在新版页面重新同步模型；如果 DSH 模型设置中已有 `workbuddy-manager` 提供方，新版会读取并保留其配置与凭据引用。其他提供方无需迁移。
 
-- 已按 [上游部署指南](https://github.com/ithtelab/workbuddy-manager/blob/main/deploy/README.md) 部署 WorkBuddy Manager，默认 `http://127.0.0.1:7864`。公网访问请走 HTTPS 反向代理，不要直接暴露管理面。
-- 在面板「密钥」页创建一把网关密钥 `wbk_...`，并确认它的**模型白名单 / 版本（国内版或国际版）/ Token 与积分配额**符合你的使用需求。
-- 可选：在「设置 → API 令牌」创建 `scope=readonly` 的只读令牌 `wbt_...`，供 CLI 查询管理面。
+## 模型与凭据
 
-插件不负责纳管账号、签到或分发密钥，这些仍在原面板完成。
+插件复用 DSH 自带的 `llm-pi-ai` 和 `openai-responses` 协议，通过设置服务的字段级操作更新 `workbuddy-manager`。已有提供方的 headers、兼容选项、模型设置和已有密钥引用会保留；其他提供方不会被替换。模型同步只追加新发现的模型，不覆盖或删除已有模型；需要手动调整模型详情时，使用 DSH 原有模型设置。
 
-## 3. 安装
+网关密钥经 DSH 凭据服务保存，配置只记录引用名。已存在的 `apiKeyEnv` 会继续使用；新提供方默认使用 `WORKBUDDY_MANAGER_API_KEY`。界面不会读取并显示已保存的密钥；修改时输入新密钥即可，留空表示保留已配置的密钥。首次创建提供方需要输入密钥，以便先检查网关连接。
 
-### 桌面版：直接添加模型提供方
+插件管理已部署的网关连接；容器或进程仍由 Docker Desktop、Compose 或部署环境的服务管理器启停。
 
-在 WorkBuddy Manager 启动、网关密钥创建完成后，打开 DSH 桌面版的「设置 → 模型 → 添加自定义提供方」，设置 Provider ID `workbuddy-manager`、API 协议 `openai-responses`、基础 URL `http://127.0.0.1:7864/v1`（或你的网关地址），并在界面中填写网关密钥。选择「获取可用模型」或手动添加模型，保存后在模型选择器中选择。
-
-此方式直接使用 DSH 自带的模型提供方功能，与现有提供方共存；下方的 bundle 安装适合需要以配置包管理路由的场景。
-
-### 安装 bundle
+## 命令行安装与查询
 
 ```sh
-# 本地打包（推荐，产物已构建，安装时无需执行脚本）
 npm pack
-dsh plugin --profile demo add ./dsh-workbuddy-manager-0.1.0.tgz
-
-# 或发布到 npm 后
-dsh plugin --profile demo add dsh-workbuddy-manager
-
-# 验证配置层已生效（应看到本 bundle 的层与 workbuddy-manager 路由）
-dsh --profile demo --dump-config
-
-# 卸载
-dsh plugin --profile demo remove dsh-workbuddy-manager
+dsh plugin --profile demo add ./dsh-workbuddy-manager-0.2.0.tgz
+# 发布后：dsh plugin --profile demo add dsh-workbuddy-manager
 ```
 
-从 GitHub 安装也可以，但 git 依赖拉的是源码：pnpm ≥10 默认不执行 `prepare`，需在 profile 的 `pnpm-workspace.yaml` 里显式允许，并固定 commit：
+只读 CLI 支持 `doctor`、`status`、`models`、`usage`、`me`、`accounts`、`credits`。使用 `WORKBUDDY_MANAGER_URL` 指定地址，`WORKBUDDY_MANAGER_API_KEY` 指定网关密钥；管理面只读查询使用 `WORKBUDDY_MANAGER_READONLY_TOKEN`。可选 `--url`、`--timeout` 和 `--json` 参数。CLI 原样输出服务响应，不假定响应字段；错误信息会脱敏。
 
-```yaml
-allowBuilds:
-  dsh-workbuddy-manager: true
-```
+## 故障排查
 
-```sh
-dsh plugin --profile demo add github:you/dsh-workbuddy-manager#<sha>
-```
-
-允许构建等于允许该包在安装时执行代码，只对你信任的仓库开启。
-
-## 4. 配置密钥
-
-`cordis.patch.yml` 只声明 `apiKeyEnv: WORKBUDDY_MANAGER_API_KEY`，密钥由 DSH credential seam 按请求解析。写入托管凭据文件（`$DSH_HOME/.credentials.yaml`，或 `~/.dsh/.credentials.yaml`）：
-
-```yaml
-version: 1
-refs:
-  WORKBUDDY_MANAGER_API_KEY: wbk_xxxxxxxx
-```
-
-解析优先级：**托管凭据文件 > 启动 DSH 时的环境变量 > 项目 `.env` > `$DSH_HOME/.env`**。环境变量需在启动 DSH 时就存在（launcher 拍的是启动环境快照，启动后再 `export` 不会被看到）：
-
-```sh
-WORKBUDDY_MANAGER_API_KEY=wbk_xxxxxxxx dsh --profile demo
-```
-
-密钥永不写入 `cordis.patch.yml`、日志或本仓库；`scripts/check-package.mjs` 会在打包前检查配置里是否混入 `wbk_` / `wbt_` 明文。
-
-## 5. 修改连接配置
-
-`cordis.patch.yml` 是 DSH 侧连接配置的唯一来源。改完重新 `--dump-config` 并在下一次请求生效（`llm-pi-ai` 按请求解析 profile，无需重启）。
-
-**改地址**：把 `baseURL` 换成你的服务地址，保留 `/v1` 结尾（`llm-pi-ai` 的模型发现会请求 `{baseURL}/models`，即 `/v1/models`）：
-
-```yaml
-baseURL: https://wb.example.com/v1
-```
-
-**加模型**：在 `models` 下追加条目。上游常见模型（上下文均为 131072）：`glm-5.2`、`glm-5.1`、`glm-5v-turbo`、`kimi-k2.7`、`minimax-m3`、`hy3`、`hy3-preview`。以面板「设置 → 可用模型」实时拉取结果为准。国际版模型带 `global:` 前缀，且要求密钥版本为国际版，跨版本会被拒绝：
-
-```yaml
-- id: global:glm-5.2
-  name: GLM-5.2 (Global)
-  contextWindow: 131072
-```
-
-若网关提供视觉模型，可给条目加 `input: [text, image]`；默认按 `[text]` 处理，避免把图片发给不支持的端点。
-
-**协议**：默认 `openai-responses`。上游文档明确「只发 `openai-responses` 协议的客户端（如 DeepSeek Harness 的自定义提供方）……需要单独建一个提供方」，因此不要用 `openai-completions` 的提供方复用它。若确实要改用 chat/completions，把 `api` 改为 `openai-completions`，并**删除** `compat.supportsMaxOutputTokens`（该字段只对 Responses 协议有效），必要时加 `compat.maxTokensField: max_tokens`；注意上游未文档化 chat/completions 侧的 tool calling 支持情况。
-
-**兼容开关**：本 bundle 默认设置 `compat.supportsMaxOutputTokens: false`，DSH 不会向网关发送输出长度上限。WorkBuddy Manager 2.11.10 的 Responses 接口[支持该字段](https://github.com/ithtelab/workbuddy-manager/blob/v2.11.10/server/routers/responses.py#L881-L882)；如需让 DSH 传递输出长度上限，可在实际生效的 provider 配置中将其设为 `true`。
-
-**其它**：`defaultContextWindow` / `defaultMaxTokens` 是未描述模型的容量回退；`retryPolicy` 控制 provider 自有重试（默认 normal、5 次，本插件设为 2 次，避免账号池被重复扣费）。
-
-### 与其它自定义 provider 共存
-
-DSH 的 patch 语义是「同一行 id 后写者胜，整行替换 `config`，不做深合并」，层序为：`dsh.profile.bundles` 各 bundle 层 → profile 自己的 `cordis.patch.yml` → home 层（`$DSH_HOME/cordis.patch.yml`）。`llm-pi-ai` 行由 `dsh-base` 以零路由休眠状态插入，本 bundle 层按 id 覆盖它；如果你在**后层**（profile 或 home 层）也覆盖了 `llm-pi-ai`，后层的整份 config 会生效，所以请把所有 provider 一起列在后层里（直接按 id 覆盖，不要再 `insert` 一行）：
-
-```yaml
-- id: llm-pi-ai
-  name: '@deepseek-ai/dsh-llm-pi-ai'
-  config:
-    providers:
-      workbuddy-manager:
-        apiKeyEnv: WORKBUDDY_MANAGER_API_KEY
-        api: openai-responses
-        baseURL: http://127.0.0.1:7864/v1
-        models:
-          - id: glm-5.2
-      my-other-gateway:
-        apiKeyEnv: MY_OTHER_KEY
-        api: openai-completions
-        baseURL: https://other.example/v1
-        models:
-          - id: some-model
-```
-
-`dsh --profile <name> --dump-config` 显示的是各层合成后的最终结果，用它确认你的行没有被后层覆盖。
-
-## 6. 只读 CLI
-
-```sh
-export WORKBUDDY_MANAGER_URL=http://127.0.0.1:7864
-export WORKBUDDY_MANAGER_API_KEY=wbk_xxxxxxxx          # /v1 数据面
-export WORKBUDDY_MANAGER_READONLY_TOKEN=wbt_xxxxxxxx    # /api 管理面，可选
-
-dsh-workbuddy doctor      # 逐项体检，任一失败返回退出码 1
-dsh-workbuddy status      # 聚合 healthz / models / usage，单项失败不影响其它项
-dsh-workbuddy models      # 网关可见模型
-dsh-workbuddy usage       # 这把密钥的 Token / 积分额度与有效期
-dsh-workbuddy me          # 当前登录身份（只读令牌）
-dsh-workbuddy accounts    # 账号列表（只读令牌）
-dsh-workbuddy credits     # 已登记积分的只读快照
-
-dsh-workbuddy models --json --url https://wb.example.com --timeout 20000
-```
-
-`--json` 输出紧凑 JSON，默认输出缩进 JSON。上游未文档化这些端点的响应字段，所以 CLI 原样输出，不做字段名假设；错误响应会经过脱敏，不会回显你提交的密钥。CLI 只发 GET，不做扫码纳管、签到、账号增删或密钥管理。
-
-## 7. 故障排查
-
-| 现象 | 原因与处理 |
+| 现象 | 处理 |
 | --- | --- |
-| 安装被拒绝 / `engines.dsh` 不满足 | 当前 DSH 是 `0.2.1-rc.5`；改用 `@0.2.2-rc.1` 或 `@next` |
-| `ERR_PNPM_UNEXPECTED_STORE` | 当前 profile 的依赖与 pnpm 配置的 store 路径不同。确认报错中 `currently linked from` 的原路径，在该 profile 的 `pnpm-workspace.yaml` 添加 `storeDir` 指向原 store 的父目录（pnpm 11 会自动追加 `v11`），然后重试安装；保留文件中的现有配置 |
-| `MISSING_CREDENTIAL` | `WORKBUDDY_MANAGER_API_KEY` 未配置；检查 `$DSH_HOME/.credentials.yaml` 的 `refs` 分节，或在启动 DSH 时导出 |
-| `INVALID_CREDENTIAL` / HTTP 401 | 密钥错误、被停用或版本不匹配；在面板核对密钥与 `/v1/models` 的返回 |
-| 模型选择器里没有 WorkBuddy Manager | `--dump-config` 确认合成后的 `llm-pi-ai` 行含 `workbuddy-manager`；若你的 profile/home 层覆盖了该行，把 workbuddy-manager 的 provider 块并入那一层 |
-| `/v1/models` 列表为空 | 密钥的模型白名单/版本限制；国内版与国际版（`global:`）互不通用 |
-| 输出长度设置未生效 | 检查实际生效的 provider 配置是否设为 `compat.supportsMaxOutputTokens: false`；该设置会省略输出上限 |
-| `TRANSPORT` / 连接超时 | 服务未启动、端口不对或反代拦截；用 `dsh-workbuddy doctor` 定位，公网请改用 HTTPS |
-| 模型目录与实际不符 | 以面板「设置 → 可用模型」为准，编辑 `cordis.patch.yml` 的 `models`；也可用 `dsh-workbuddy models --json` 对照 |
+| 安装时 DSH 版本不兼容 | 使用 `0.2.2-rc.1`，核对插件的 `engines.dsh`。 |
+| `ERR_PNPM_UNEXPECTED_STORE` | 将该 profile 的 `pnpm-workspace.yaml` 的 `storeDir` 设为报错中原 store 的父目录，保留现有配置，再重试。pnpm 11 会自行追加 `v11`。 |
+| 设置中没有 WorkBuddy | 确认插件已安装并启用，刷新页面；必要时重启 DSH。 |
+| 网关连接失败或 HTTP 401 | 检查服务是否启动、地址是否正确，以及密钥是否有效并允许相应模型。 |
+| 没有发现模型 | 检查管理页面中的模型白名单和国内版／国际版权限。 |
+| 配置发生冲突 | 点击 **重新载入**，检查当前设置后重新同步。 |
+| 模型配置更新但密钥保存失败 | 检查 DSH 凭据存储是否可写，重新载入页面后重试。 |
 
-## 8. 安全与使用边界
+## 安全和使用边界
 
-- 密钥只在 DSH 凭据/环境变量中，配置层仅引用变量名；CLI 不持久化、不打印密钥，错误响应会脱敏。
-- 管理面命令建议使用 `scope=readonly` 的 `wbt_` 令牌，不要用管理员会话 Cookie 或 `scope=admin` 令牌。
-- 遵循上游免责声明：**仅用于管理本人及亲属自愿授权的账号**，自用与学习研究；禁止批量注册、代注册、接码、账号买卖出租、盗号撞库、绕过实名/风控/区域限制，以及任何对外收费、转售、引流或盈利性用途。违规导致的封号、数据丢失与法律责任由使用者自行承担。本项目与腾讯、CodeBuddy 官方无隶属关系。
+- 不把网关密钥写入模型配置、命令历史或项目文件。远程网关使用 HTTPS。
+- CLI 管理面查询建议使用只读令牌，不使用管理员会话 Cookie。
+- 仅管理本人及亲属自愿授权的账号，遵循上游项目的授权和使用规则；禁止批量注册、账号交易、绕过平台风控和商业转售。
 
-## 9. 开发
+## 开发与验证
 
 ```sh
 npm install
-npm run typecheck     # tsc --noEmit
-npm test              # 先构建，再用真实本地 HTTP 服务跑契约测试
-npm run build         # 输出 lib/
-npm run check:package # 校验 bundle 配置与构建产物
-npm pack --dry-run    # 检查最终发布内容
+npm run typecheck
+npm test
+npm run check:package
+npm pack --dry-run
 ```
 
-macOS 桌面版宿主集成测试（使用桌面应用内置运行时，向本地测试服务器发送模拟流式请求）：
+macOS 桌面宿主集成测试使用目标桌面版运行时和临时本地模拟网关，覆盖模型发现、字段级配置更新、流式请求与工具调用：
 
 ```sh
 ELECTRON_RUN_AS_NODE=1 \
@@ -190,6 +73,4 @@ DSH_RUNTIME_ROOT="/Applications/DeepSeek Harness.app/Contents/Resources/app.asar
   --test tests/desktop-host.test.mjs
 ```
 
-普通 `npm test` 在未设置 `DSH_RUNTIME_ROOT` 时跳过该宿主集成测试；通过桌面运行时执行时请使用与目标桌面版相同的版本。
-
-升级 DSH 时的检查清单：① `npm view @deepseek-ai/dsh dist-tags --json` 确认新版；② 读官方 Release Notes 的 breaking changes；③ 用 `npm pack @deepseek-ai/dsh-llm-pi-ai@<版本>` 复核 `PiAiProviderProfile` 字段；④ 更新 `engines.dsh` 与 `scripts/check-package.mjs` 的版本断言；⑤ 重跑上面的验证命令。
+普通 `npm test` 在没有 `DSH_RUNTIME_ROOT` 时跳过桌面宿主集成测试。升级 DSH 后应重新核对设置、凭据、模型发现和 `llm-pi-ai` schema 接口，并重跑测试。

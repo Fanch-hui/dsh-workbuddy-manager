@@ -1,22 +1,23 @@
 {
   "name": "dsh-workbuddy-manager",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "接入 WorkBuddy Manager 账号池网关的 DeepSeek Harness 插件（DSH 0.2.2-rc.1）",
   "type": "module",
   "license": "MIT",
-  "main": "./lib/client.js",
-  "types": "./lib/client.d.ts",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
   "bin": {
     "dsh-workbuddy": "./lib/cli.js"
   },
   "exports": {
     ".": {
-      "types": "./lib/client.d.ts",
-      "default": "./lib/client.js"
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
     },
     "./client": {
       "types": "./lib/client.d.ts",
-      "default": "./lib/client.js"
+      "node": "./lib/client.js",
+      "default": "./lib/ui-bundle.js"
     },
     "./package.json": "./package.json"
   },
@@ -33,11 +34,18 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ],
+      "platform": "web"
     }
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "node scripts/clean-build.mjs && tsc -p tsconfig.build.json",
+    "build": "node scripts/clean-build.mjs && tsc -p tsconfig.build.json && node scripts/build-ui.mjs",
     "test": "npm run build && node --import tsx --test tests/*.test.ts tests/*.test.mjs",
     "check:package": "node scripts/check-package.mjs",
     "prepare": "npm run build",
@@ -45,6 +53,9 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@types/react": "^18.3.31",
+    "esbuild": "^0.25.12",
+    "react": "^18.3.1",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0",
     "yaml": "^2.9.1"

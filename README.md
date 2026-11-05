@@ -39,7 +39,7 @@
 ## 配置与边界
 
 - `cordis.patch.yml` 是 DSH 侧连接配置的唯一来源（地址、协议、模型目录、兼容开关）。改地址/加模型/换协议请看仓库 `docs/usage.md`。
-- bundle 覆盖 `dsh-base` 里零路由休眠挂载的 `llm-pi-ai` 行，patch 会**整行替换** config；若你还配置了其它自定义 provider，请在 profile 自己的 `cordis.patch.yml` 里重写该行。
+- bundle 按 id 覆盖 `dsh-base` 里零路由休眠挂载的 `llm-pi-ai` 行；DSH 的 patch 语义是「后写者胜、整行替换 config」。若你在 profile 或 home 层也覆盖了该行，请把 workbuddy-manager 的 provider 块并入那一层。
 - 使用边界遵循上游项目：仅限管理本人及亲属自愿授权的账号，自用与学习研究；禁止批量注册、账号交易、绕过平台风控以及任何商业转售用途。本项目与腾讯、CodeBuddy 官方无隶属关系。
 
 完整安装、故障排查与开发说明见仓库 `docs/usage.md`（不随插件包分发）。插件自身代码按 MIT 许可。

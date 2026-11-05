@@ -1,4 +1,4 @@
-import type { CliOptions } from './config.js'
+import type { CliOptions } from './cli-config.js'
 
 export class WorkbuddyError extends Error {
   constructor(readonly code: string, message: string) {

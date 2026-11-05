@@ -1,5 +1,5 @@
 import { WorkbuddyError, WorkbuddyManagerClient } from './client.js'
-import type { CliOptions } from './config.js'
+import type { CliOptions } from './cli-config.js'
 
 export interface CheckResult {
   name: string

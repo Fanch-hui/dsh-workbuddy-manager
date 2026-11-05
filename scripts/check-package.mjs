@@ -41,9 +41,10 @@ export function validatePackage(root = ROOT) {
   expect(Array.isArray(manifest?.files) && manifest.files.includes('cordis.patch.yml'), '发布文件包含 cordis.patch.yml')
   expect(manifest?.bin?.['dsh-workbuddy'] === './lib/cli.js', 'CLI bin 指向构建产物')
 
-  const row = Array.isArray(patch)
-    ? patch.flatMap(layer => layer?.insert ?? []).find(entry => entry?.id === 'llm-pi-ai')
-    : undefined
+  // The llm-pi-ai row already exists in dsh-base (dormant); the bundle layer
+  // must address it by id, not insert a second row with the same id.
+  const row = Array.isArray(patch) && patch.length === 1 ? patch[0] : undefined
+  expect(row?.id === 'llm-pi-ai' && row?.insert === undefined, 'patch 按 id 覆盖 dsh-base 的 llm-pi-ai 行，而非插入重复行')
   expect(row?.name === '@deepseek-ai/dsh-llm-pi-ai', 'patch 覆盖 dsh-base 的 llm-pi-ai 行')
   const provider = row?.config?.providers?.[PROVIDER]
   expect(Boolean(provider), '注入 workbuddy-manager provider 路由')

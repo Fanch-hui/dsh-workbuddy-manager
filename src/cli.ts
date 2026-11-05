@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { CliError, HELP_TEXT, parseArgs } from './config.js'
+import { CliError, HELP_TEXT, parseArgs } from './cli-config.js'
 import { WorkbuddyManagerClient } from './client.js'
 import { runDoctor } from './doctor.js'
 import { snapshot } from './status.js'

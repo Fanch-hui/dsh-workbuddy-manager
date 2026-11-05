@@ -99,27 +99,28 @@ baseURL: https://wb.example.com/v1
 
 ### 与其它自定义 provider 共存
 
-bundle patch 会**整行替换** `llm-pi-ai` 行的 `config`，不做深合并。`dsh-base` 里该行原本是零路由休眠挂载，所以默认不会丢任何东西；但如果你在更早的 bundle 或设置页里配过其它 provider，请在 **profile 自己的 `cordis.patch.yml`**（后层优先）重写整行，把所有 provider 一起列出：
+DSH 的 patch 语义是「同一行 id 后写者胜，整行替换 `config`，不做深合并」，层序为：`dsh.profile.bundles` 各 bundle 层 → profile 自己的 `cordis.patch.yml` → home 层（`$DSH_HOME/cordis.patch.yml`）。`llm-pi-ai` 行由 `dsh-base` 以零路由休眠状态插入，本 bundle 层按 id 覆盖它；如果你在**后层**（profile 或 home 层）也覆盖了 `llm-pi-ai`，后层的整份 config 会生效，所以请把所有 provider 一起列在后层里（直接按 id 覆盖，不要再 `insert` 一行）：
 
 ```yaml
-- insert:
-    - id: llm-pi-ai
-      name: '@deepseek-ai/dsh-llm-pi-ai'
-      config:
-        providers:
-          workbuddy-manager:
-            apiKeyEnv: WORKBUDDY_MANAGER_API_KEY
-            api: openai-responses
-            baseURL: http://127.0.0.1:7864/v1
-            models:
-              - id: glm-5.2
-          my-other-gateway:
-            apiKeyEnv: MY_OTHER_KEY
-            api: openai-completions
-            baseURL: https://other.example/v1
-            models:
-              - id: some-model
+- id: llm-pi-ai
+  name: '@deepseek-ai/dsh-llm-pi-ai'
+  config:
+    providers:
+      workbuddy-manager:
+        apiKeyEnv: WORKBUDDY_MANAGER_API_KEY
+        api: openai-responses
+        baseURL: http://127.0.0.1:7864/v1
+        models:
+          - id: glm-5.2
+      my-other-gateway:
+        apiKeyEnv: MY_OTHER_KEY
+        api: openai-completions
+        baseURL: https://other.example/v1
+        models:
+          - id: some-model
 ```
+
+`dsh --profile <name> --dump-config` 显示的是各层合成后的最终结果，用它确认你的行没有被后层覆盖。
 
 ## 6. 只读 CLI
 
@@ -148,7 +149,7 @@ dsh-workbuddy models --json --url https://wb.example.com --timeout 20000
 | 安装被拒绝 / `engines.dsh` 不满足 | 当前 DSH 是 `0.2.1-rc.5`；改用 `@0.2.2-rc.1` 或 `@next` |
 | `MISSING_CREDENTIAL` | `WORKBUDDY_MANAGER_API_KEY` 未配置；检查 `$DSH_HOME/.credentials.yaml` 的 `refs` 分节，或在启动 DSH 时导出 |
 | `INVALID_CREDENTIAL` / HTTP 401 | 密钥错误、被停用或版本不匹配；在面板核对密钥与 `/v1/models` 的返回 |
-| 模型选择器里没有 WorkBuddy Manager | 先 `dsh --profile demo --dump-config` 确认 bundle 层存在；再确认 profile 层没有覆盖 `llm-pi-ai` 行 |
+| 模型选择器里没有 WorkBuddy Manager | `--dump-config` 确认合成后的 `llm-pi-ai` 行含 `workbuddy-manager`；若你的 profile/home 层覆盖了该行，把 workbuddy-manager 的 provider 块并入那一层 |
 | `/v1/models` 列表为空 | 密钥的模型白名单/版本限制；国内版与国际版（`global:`）互不通用 |
 | HTTP 400 且请求体含 `max_output_tokens` | 保留 `compat.supportsMaxOutputTokens: false` |
 | `TRANSPORT` / 连接超时 | 服务未启动、端口不对或反代拦截；用 `dsh-workbuddy doctor` 定位，公网请改用 HTTPS |

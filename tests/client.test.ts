@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { test } from 'node:test'
 import { WorkbuddyError, WorkbuddyManagerClient } from '../src/client.js'
-import { CliError, parseArgs, type CliOptions } from '../src/config.js'
+import { CliError, parseArgs, type CliOptions } from '../src/cli-config.js'
 import { runDoctor } from '../src/doctor.js'
 import { snapshot } from '../src/status.js'
 

@@ -1,52 +1,56 @@
 # dsh-workbuddy-manager bundle layer.
 #
-# dsh-base mounts `llm-pi-ai` dormant (zero provider routes). This layer writes
-# that same row by id with a hand-declared route for a WorkBuddy Manager gateway.
-# A bundle patch replaces the row's whole `config`, so keep every provider you
-# need in this row, or restate this row in the profile's own cordis.patch.yml
-# (later layers win). See docs/usage.md.
+# dsh-base inserts a dormant `llm-pi-ai` row (zero provider routes). This layer
+# addresses that row by id and replaces its whole `config` with one
+# hand-declared route for a WorkBuddy Manager gateway. Patch semantics are
+# "last write wins per row" with no config merge: a patch entry sets the
+# targeted row's complete `config`.
+#
+# Layer order: bundle layers in `dsh.profile.bundles` order, then the profile's
+# own cordis.patch.yml, then the home-level layer. Any later layer that also
+# overrides `llm-pi-ai` replaces this whole config, so restate the providers
+# you need in that layer (see docs/usage.md).
 #
 # The gateway key is a credential reference resolved per request by the DSH
 # credential seam ($DSH_HOME/.credentials.yaml, then environment/.env), never a
 # literal in this file.
-- insert:
-    - id: llm-pi-ai
-      name: '@deepseek-ai/dsh-llm-pi-ai'
-      config:
-        providers:
-          workbuddy-manager:
-            displayName: WorkBuddy Manager
-            apiKeyEnv: WORKBUDDY_MANAGER_API_KEY
-            api: openai-responses
-            baseURL: http://127.0.0.1:7864/v1
-            # The gateway's /v1/responses is OpenAI-Responses compatible but
-            # does not document accepting max_output_tokens; omit that field.
-            compat:
-              supportsMaxOutputTokens: false
-            defaultContextWindow: 131072
-            defaultMaxTokens: 32768
-            models:
-              - id: glm-5.2
-                name: GLM-5.2
-                contextWindow: 131072
-              - id: glm-5.1
-                name: GLM-5.1
-                contextWindow: 131072
-              - id: glm-5v-turbo
-                name: GLM-5V Turbo
-                contextWindow: 131072
-              - id: kimi-k2.7
-                name: Kimi K2.7
-                contextWindow: 131072
-              - id: minimax-m3
-                name: MiniMax M3
-                contextWindow: 131072
-              - id: hy3
-                name: Hunyuan 3
-                contextWindow: 131072
-              - id: hy3-preview
-                name: Hunyuan 3 Preview
-                contextWindow: 131072
-            retryPolicy:
-              mode: normal
-              maxRetries: 2
+- id: llm-pi-ai
+  name: '@deepseek-ai/dsh-llm-pi-ai'
+  config:
+    providers:
+      workbuddy-manager:
+        displayName: WorkBuddy Manager
+        apiKeyEnv: WORKBUDDY_MANAGER_API_KEY
+        api: openai-responses
+        baseURL: http://127.0.0.1:7864/v1
+        # The gateway's /v1/responses is OpenAI-Responses compatible but
+        # does not document accepting max_output_tokens; withhold that field.
+        compat:
+          supportsMaxOutputTokens: false
+        defaultContextWindow: 131072
+        defaultMaxTokens: 32768
+        models:
+          - id: glm-5.2
+            name: GLM-5.2
+            contextWindow: 131072
+          - id: glm-5.1
+            name: GLM-5.1
+            contextWindow: 131072
+          - id: glm-5v-turbo
+            name: GLM-5V Turbo
+            contextWindow: 131072
+          - id: kimi-k2.7
+            name: Kimi K2.7
+            contextWindow: 131072
+          - id: minimax-m3
+            name: MiniMax M3
+            contextWindow: 131072
+          - id: hy3
+            name: Hunyuan 3
+            contextWindow: 131072
+          - id: hy3-preview
+            name: Hunyuan 3 Preview
+            contextWindow: 131072
+        retryPolicy:
+          mode: normal
+          maxRetries: 2

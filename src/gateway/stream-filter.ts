@@ -8,6 +8,9 @@ export const RESTRICTED_CODE = 11140
 export const RESTRICTED_TEXT = /account has been restricted due to unusual activity|账号存在异常行为|帳號存在異常行為|["']code["']\s*:\s*["']?11140(?![\d.])/i
 export const EXHAUSTED_HINT = 'WorkBuddy requires an active credit package even for 0-rate free models; check your account package balance'
 export const EXHAUSTED_TEXT = /credits exhausted|额度已用尽|["']code["']\s*:\s*["']?14018(?![\d.])/i
+export const MODEL_RATE_LIMIT_TEXT = /switch to the other models|切换其他模型|切換其他模型/i
+
+export const isModelRateLimit = (text: string): boolean => MODEL_RATE_LIMIT_TEXT.test(text)
 
 export function namedBack(v: any, names: Map<string, string>): boolean {
   let changed = false
@@ -72,6 +75,17 @@ const filterSaid = (text: string): boolean => {
   return FILTER_SAYS.some(s => s.startsWith(t))
 }
 
+const chunkOf = (ev: string): any => {
+  const m = /^data:\s?(.*)$/m.exec(ev)
+  if (!m || m[1] === '[DONE]') return null
+  try {
+    const v = JSON.parse(m[1])
+    return v && typeof v === 'object' ? v : null
+  } catch {
+    return null
+  }
+}
+
 export function unsaid(res: Response): Response {
   if (!res.body || !/event-stream/i.test(res.headers.get('content-type') ?? '')) return res
   const headers = new Headers(res.headers)
@@ -83,16 +97,6 @@ export function unsaid(res: Response): Response {
   let open = true
   let said = ''
   let held: string[] = []
-  const chunkOf = (ev: string): any => {
-    const m = /^data:\s?(.*)$/m.exec(ev)
-    if (!m || m[1] === '[DONE]') return null
-    try {
-      const v = JSON.parse(m[1])
-      return v && typeof v === 'object' ? v : null
-    } catch {
-      return null
-    }
-  }
   const without = (ev: string): string => {
     const v = chunkOf(ev)
     const c = v?.choices?.[0]
@@ -149,6 +153,79 @@ export function unsaid(res: Response): Response {
   return new Response(body, { status: res.status, statusText: res.statusText, headers })
 }
 
+export async function inspectStreamForFailover(
+  res: Response,
+): Promise<{ response: Response; filterRefused: boolean; streamErrorText?: string }> {
+  if (!res.body || !/event-stream/i.test(res.headers.get('content-type') ?? '')) {
+    return { response: res, filterRefused: false }
+  }
+  const reader = res.body.getReader()
+  const buffered: Uint8Array[] = []
+  const dec = new TextDecoder()
+  let rest = ''
+  let said = ''
+  let open = true
+  let filterRefused = false
+  let streamErrorText: string | undefined
+
+  const checkEvent = (ev: string): void => {
+    if (!open) return
+    const v = chunkOf(ev)
+    if (v?.error) {
+      open = false
+      filterRefused = true
+      streamErrorText = JSON.stringify(v)
+      return
+    }
+    const c = v?.choices?.[0]
+    const text = typeof c?.delta?.content === 'string' ? c.delta.content : ''
+    const finish = c?.finish_reason
+    const calls = c?.delta?.tool_calls
+    if ((Array.isArray(calls) ? calls.length > 0 : Boolean(calls)) || (text && !filterSaid(said + text))) {
+      open = false
+      return
+    }
+    said += text
+    if (finish === 'content_filter') {
+      open = false
+      filterRefused = true
+    } else if (finish) {
+      open = false
+    }
+  }
+
+  let done = false
+  while (open && !done) {
+    const step = await reader.read()
+    done = step.done
+    if (step.value) {
+      buffered.push(step.value)
+      rest = (rest + dec.decode(step.value, { stream: true })).replace(/\r\n/g, '\n')
+      const evs = rest.split('\n\n')
+      rest = evs.pop() ?? ''
+      for (const ev of evs) checkEvent(ev)
+    }
+  }
+  if (open && rest.trim()) checkEvent(rest)
+
+  const replay = new ReadableStream<Uint8Array>({
+    start(ctl) {
+      for (const chunk of buffered) ctl.enqueue(chunk)
+      if (done) ctl.close()
+    },
+    async pull(ctl) {
+      const step = await reader.read()
+      if (step.done) ctl.close()
+      else if (step.value) ctl.enqueue(step.value)
+    },
+    cancel(reason) {
+      return reader.cancel(reason)
+    },
+  })
+  const rewrapped = new Response(replay, { status: res.status, statusText: res.statusText, headers: res.headers })
+  return { response: unsaid(rewrapped), filterRefused, ...(streamErrorText ? { streamErrorText } : {}) }
+}
+
 export function windowOffset(text: unknown): number | null {
   const m = /\b(?:UTC|GMT)\s*([+-])\s*(\d{1,2})(?::?(\d{2}))?\b/i.exec(String(text ?? ''))
   if (!m) return null
@@ -168,7 +245,14 @@ export function windowReset(text: unknown): number {
   return Date.UTC(+at[1], +at[2] - 1, +at[3], +at[4], +at[5], +at[6]) - off * 60000
 }
 
-export function classifyUpstreamError(text: string): { isRefused: boolean; isRestricted: boolean; isExhausted: boolean; codes: number[]; message: string } {
+export function classifyUpstreamError(text: string): {
+  isRefused: boolean
+  isRestricted: boolean
+  isExhausted: boolean
+  isModelRateLimit: boolean
+  codes: number[]
+  message: string
+} {
   let v: any
   try { v = JSON.parse(text) } catch {}
   const at = v?.error && typeof v.error === 'object' ? v.error : v && typeof v === 'object' ? v : null
@@ -183,7 +267,7 @@ export function classifyUpstreamError(text: string): { isRefused: boolean; isRes
   else if (typeof v?.error === 'string') msg = v.error
   else if (typeof v?.msg === 'string' && v.msg) msg = v.msg
   else if (typeof v?.data?.msg === 'string') msg = v.data.msg
-  return { isRefused, isRestricted, isExhausted, codes, message: msg }
+  return { isRefused, isRestricted, isExhausted, isModelRateLimit: isModelRateLimit(text), codes, message: msg }
 }
 
 export async function explained(res: Response, preReadText?: string): Promise<Response> {
@@ -192,6 +276,7 @@ export async function explained(res: Response, preReadText?: string): Promise<Re
     const headers = new Headers(res.headers)
     headers.delete('content-length')
     headers.delete('content-encoding')
+    headers.set('X-Magpie-Sign-In', 'kept')
     return new Response(b, { status: res.status, statusText: res.statusText, headers })
   }
   const { isRefused, isRestricted, isExhausted, message } = classifyUpstreamError(text)
@@ -205,6 +290,7 @@ export async function explained(res: Response, preReadText?: string): Promise<Re
   headers.set('content-type', 'application/json')
   headers.delete('content-length')
   headers.delete('content-encoding')
+  headers.set('X-Magpie-Sign-In', 'kept')
   return new Response(JSON.stringify({ error: { message: msg, type, code: errCode } }), {
     status: res.status,
     statusText: res.statusText,

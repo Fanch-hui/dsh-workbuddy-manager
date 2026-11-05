@@ -1,4 +1,4 @@
-import { chatOf, systemOn, withSystem } from './rewrite.js'
+import { chatOf, systemOn, unsignedOn, withSystem } from './rewrite.js'
 
 const NAME_OK = /^[A-Za-z0-9_-]+$/
 const NUL_ESCAPE = /\\\\|\\0(?![0-9])/g
@@ -276,9 +276,10 @@ export function toolChoiceOn(b: any): boolean {
   return true
 }
 
-export function prepared(body: string): { body: string; chat: Record<string, any> | null; names: Map<string, string>; changed: boolean } {
+export function prepared(body: string, native = false): { body: string; chat: Record<string, any> | null; names: Map<string, string>; changed: boolean } {
   const chat = chatOf(body)
   if (!chat) return { body, chat: null, names: new Map(), changed: false }
+  if (native) return { body, chat, names: new Map(), changed: unsignedOn(chat) }
   try {
     let changed = systemOn(chat)
     const fit = fitTools(chat)

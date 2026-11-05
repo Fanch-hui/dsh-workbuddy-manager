@@ -282,3 +282,49 @@ export function gzipped(completion: boolean, b: string | Uint8Array | ArrayBuffe
   if (ArrayBuffer.isView(b)) return new Uint8Array(gzipSync(Buffer.from(b.buffer, b.byteOffset, b.byteLength)))
   return null
 }
+
+export function isMessages(url: string, body?: unknown): boolean {
+  let path = ''
+  try { path = new URL(String(url ?? ''), 'http://127.0.0.1').pathname } catch {}
+  if (path && /\/messages(\/count_tokens)?$/.test(path)) return true
+  if (path && /\/chat\/completions$/.test(path)) return false
+  const b = chatOf(body)
+  if (!b) return false
+  if (Array.isArray(b.system)) return true
+  const tools = Array.isArray(b.tools) ? b.tools : []
+  return tools.some((t: any) => t && typeof t === 'object' && 'input_schema' in t && !t.function)
+}
+
+export function unsignedOn(b: any): boolean {
+  const msgs = b?.messages
+  if (!Array.isArray(msgs)) return false
+  let changed = false
+  for (const m of msgs) {
+    if (m?.role !== 'assistant' || !Array.isArray(m.content)) continue
+    const kept = m.content.filter((p: any) => !(p?.type === 'thinking' && !p.signature))
+    if (kept.length === m.content.length) continue
+    changed = true
+    m.content = kept.length ? kept : [{ type: 'text', text: '' }]
+  }
+  return changed
+}
+
+export function withoutUnsigned(body: string): string {
+  const b = chatOf(body)
+  return b && unsignedOn(b) ? JSON.stringify(b) : body
+}
+
+export function withoutSignedThinking(body: string): string | null {
+  const b = chatOf(body)
+  const msgs = b?.messages
+  if (!Array.isArray(msgs)) return null
+  let dropped = 0
+  for (const m of msgs) {
+    if (m?.role !== 'assistant' || !Array.isArray(m.content)) continue
+    const kept = m.content.filter((p: any) => p?.type !== 'thinking')
+    if (kept.length === m.content.length) continue
+    dropped += m.content.length - kept.length
+    m.content = kept.length ? kept : [{ type: 'text', text: '' }]
+  }
+  return dropped ? JSON.stringify(b) : null
+}

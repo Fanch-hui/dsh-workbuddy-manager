@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import { domainOf, enterpriseHeaders, hex, type AccountIdentity, type Realm, type SiteConfig } from './sites.js'
 
 const EARLY_MS = 60 * 1000
@@ -31,6 +34,10 @@ export interface SignedInAccount extends AccountIdentity {
   enterpriseId?: string
   enterpriseName?: string
 }
+
+export type ReissueOutcome =
+  | { a: AccountIdentity; why?: undefined; kind?: undefined }
+  | { a?: undefined; why: string; kind: 'refresh refused' | 'nothing to renew with' | 'unknown' }
 
 export async function call(
   site: SiteConfig,
@@ -77,27 +84,81 @@ export function mergeToken(a: AccountIdentity, got: Record<string, any>): Accoun
   return out
 }
 
-export function stale(a: AccountIdentity): boolean {
-  return Boolean(a.expires && Date.now() >= a.expires - EARLY_MS)
-}
-
-export function refreshable(a: AccountIdentity): boolean {
-  return Boolean(a.refresh && !(a.refreshExpiresAt && Date.now() >= a.refreshExpiresAt))
-}
-
+export const stale = (a: AccountIdentity): boolean => Boolean(a.expires && Date.now() >= a.expires - EARLY_MS)
+export const refreshable = (a: AccountIdentity): boolean => Boolean(a.refresh && !(a.refreshExpiresAt && Date.now() >= a.refreshExpiresAt))
 export const invalidToken = (res?: Response | null): boolean =>
   res?.status === 401 && /invalid_token/i.test(res.headers.get('www-authenticate') ?? '')
-
 export const refreshRefused = (e: unknown): boolean =>
   e instanceof WBError && (e.status === 401 || /invalid_grant/i.test(e.message) || Number(e.code) === 12153 || Number(e.code) === 10000)
 
 const renewing = new Map<string, Promise<AccountIdentity>>()
 const renewed = new Map<string, { next: AccountIdentity; at: number }>()
+export const desktopHeld = new Map<string, AccountIdentity>()
 
 function merged(a: AccountIdentity, next: AccountIdentity): AccountIdentity {
   const out: Record<string, any> = { ...a }
   for (const k of TOKEN_FIELDS) if (k in next && next[k] !== undefined) out[k] = next[k]
   return out as AccountIdentity
+}
+
+export function desktopFile(site: SiteConfig): string {
+  const override = process.env.WORKBUDDY_DESKTOP_AUTH_DIR
+  if (override) return join(override, `${site.authID}.info`)
+  const home = homedir()
+  const base = process.platform === 'darwin'
+    ? join(home, 'Library', 'Application Support', 'CodeBuddyExtension')
+    : process.platform === 'win32'
+      ? join(home, 'AppData', 'Local', 'CodeBuddyExtension')
+      : join(home, '.local', 'share', 'CodeBuddyExtension')
+  return join(base, 'Data', 'Public', 'auth', `${site.authID}.info`)
+}
+
+export function readDesktop(site: SiteConfig): (AccountIdentity & { uid: string; name: string; source: 'desktop' }) | null {
+  try {
+    const f = JSON.parse(readFileSync(desktopFile(site), 'utf8'))
+    const t = f?.auth ?? {}
+    if (typeof t.accessToken !== 'string' || !t.accessToken || !f?.account?.uid) return null
+    const now = Date.now()
+    const acct = f.account
+    return {
+      access: t.accessToken,
+      refresh: typeof t.refreshToken === 'string' ? t.refreshToken : '',
+      expires: t.expiresAt > 0 ? t.expiresAt : t.expiresIn > 0 ? now + t.expiresIn * 1000 : 0,
+      refreshExpiresAt: t.refreshExpiresAt > 0 ? t.refreshExpiresAt : t.refreshExpiresIn > 0 ? now + t.refreshExpiresIn * 1000 : 0,
+      domain: typeof t.domain === 'string' ? t.domain : '',
+      tokenType: typeof t.tokenType === 'string' ? t.tokenType : '',
+      uid: String(acct.uid),
+      ...(typeof acct.enterpriseId === 'string' && acct.enterpriseId.trim() ? { enterpriseId: acct.enterpriseId.trim() } : {}),
+      name: String(acct.nickname || acct.phoneNumber || acct.uid),
+      source: 'desktop',
+    }
+  } catch {
+    return null
+  }
+}
+
+export function notDesktop(site: SiteConfig): string {
+  try {
+    const t = JSON.parse(readFileSync(desktopFile(site), 'utf8'))?.auth ?? {}
+    if (t.accessToken?.$wbEncrypted || t.refreshToken?.$wbEncrypted) {
+      return `${site.name} 桌面端（5.6 及以上版本）对本地令牌进行了加密存储，无法直接读取，请使用扫码或链接方式登录。`
+    }
+  } catch {}
+  return `未检测到 ${site.name} 桌面端登录状态。`
+}
+
+export function keyAccount(rawKey: string, realm: Realm, nickname?: string): SignedInAccount | null {
+  const key = rawKey.trim()
+  if (!key) return null
+  const suffix = key.slice(-8)
+  return {
+    realm,
+    uid: `anonymous_${suffix}`,
+    nickname: nickname?.trim() || `API Key (${suffix})`,
+    access: key,
+    key,
+    source: 'key',
+  }
 }
 
 export function renew(
@@ -133,6 +194,17 @@ export async function fresh(
   a: AccountIdentity,
   save?: (next: AccountIdentity) => Promise<void> | void,
 ): Promise<AccountIdentity> {
+  if (a.source === 'key') return a
+  if (a.source === 'desktop') {
+    const d = readDesktop(site)
+    if (!d) throw new Error(notDesktop(site))
+    const k = `${site.id}|${d.uid}`
+    const h = desktopHeld.get(k)
+    const base = h && (h.expires ?? 0) >= (d.expires ?? 0) ? h : d
+    const next = !stale(base) ? base : refreshable(base) ? await renew(site, base).catch(() => base) : base
+    desktopHeld.set(k, next)
+    return { ...a, ...next, source: 'desktop' }
+  }
   if (!stale(a)) return a
   if (!refreshable(a)) {
     if (a.access) return a
@@ -141,9 +213,87 @@ export async function fresh(
   try {
     return await renew(site, a, save)
   } catch (e: any) {
-    if (a.access && !refreshRefused(e)) return a
-    throw e
+    if (a.access) return a
+    if (e?.bare) throw e
+    throw new Error(`WorkBuddy token refresh: ${e?.said ?? e?.message ?? e}`)
   }
+}
+
+export async function reissued(
+  site: SiteConfig,
+  getAccount: () => Promise<AccountIdentity | null | undefined>,
+  saveAccount: ((next: AccountIdentity) => Promise<void> | void) | undefined,
+  a: AccountIdentity,
+  began?: string,
+): Promise<ReissueOutcome> {
+  if (a.source === 'desktop') {
+    desktopHeld.delete(`${site.id}|${a.uid ?? ''}`)
+    const d = readDesktop(site)
+    if (!d) return { why: notDesktop(site), kind: 'unknown' }
+    if (d.access !== a.access) {
+      desktopHeld.set(`${site.id}|${a.uid ?? ''}`, d)
+      return { a: { ...a, ...d, source: 'desktop' } }
+    }
+    return { why: `${site.name} desktop's own sign-in is the one refused`, kind: 'unknown' }
+  }
+  const newer = async (): Promise<AccountIdentity | null> => {
+    const now = await getAccount().catch(() => null)
+    return now && now.source !== 'desktop' && now.source !== 'key' && now.access && now.access !== began && now.access !== a.access
+      ? now
+      : null
+  }
+  const saved = await newer()
+  if (saved) return { a: saved }
+  if (!refreshable(a)) {
+    return { why: a.refresh ? 'its refresh token has ended' : 'there is no refresh token to renew it with', kind: 'nothing to renew with' }
+  }
+  try {
+    const next = await renew(site, a, saveAccount)
+    return next.access !== a.access ? { a: next } : { why: 'renewing it gave the same token', kind: 'unknown' }
+  } catch (e: any) {
+    if (refreshRefused(e)) {
+      const concurrent = await newer()
+      if (concurrent) return { a: concurrent }
+      return { why: `it refused the refresh token too (${e?.said ?? e?.message})`, kind: 'refresh refused' }
+    }
+    return { why: `renewing it failed: ${e?.said ?? e?.message ?? e}`, kind: 'unknown' }
+  }
+}
+
+export const gone = (a: AccountIdentity, r: { kind?: string }, tokenRefused: boolean): boolean =>
+  a.source !== 'desktop' && (r.kind === 'refresh refused' || (r.kind === 'nothing to renew with' && Boolean(tokenRefused)))
+
+export function refusedText(site: SiteConfig, a: AccountIdentity, why?: string, note?: string): string {
+  return (
+    `${site.name} refused this account's sign-in (401)${why ? `; ${why}` : ''}. ${note ? `${note} ` : ''}` +
+    (a.source === 'desktop'
+      ? `Sign in to ${site.name} desktop again; the gateway reads its sign-in on the next request.`
+      : `Sign in to ${site.name} again in DSH Settings → WorkBuddy.`)
+  )
+}
+
+export function keyRefused(site: SiteConfig, expired: boolean, note?: string): Response {
+  const message = `${site.name} refused this API key (401). ${note ? `${note} ` : ''}Check the key at ${site.keys}, then add it again in DSH Settings → WorkBuddy.`
+  return new Response(JSON.stringify({ error: { message, type: 'authentication_error', code: 401 } }), {
+    status: 401,
+    statusText: 'Unauthorized',
+    headers: { 'content-type': 'application/json', 'X-Magpie-Sign-In': expired ? 'expired' : 'kept' },
+  })
+}
+
+export function signedOut(site: SiteConfig, a: AccountIdentity, why: string, expired: boolean, note?: string): Response {
+  const message = refusedText(site, a, why, note)
+  return new Response(JSON.stringify({ error: { message, type: 'authentication_error', code: 401 } }), {
+    status: 401,
+    statusText: 'Unauthorized',
+    headers: { 'content-type': 'application/json', 'X-Magpie-Sign-In': expired ? 'expired' : 'kept' },
+  })
+}
+
+export function kept(res: Response, said: 'kept' | 'renewed' = 'kept'): Response {
+  const headers = new Headers(res.headers)
+  headers.set('X-Magpie-Sign-In', said)
+  return new Response(res.body, { status: res.status, statusText: res.statusText, headers })
 }
 
 export async function enterpriseOf(
@@ -183,29 +333,15 @@ export function accountName(who: Record<string, any>, ent?: { id?: string; name?
 }
 
 export async function startBrowserAuth(site: SiteConfig): Promise<PendingAuth> {
-  const state = await call(
-    site,
-    'POST',
-    `/v2/plugin/auth/state?platform=${encodeURIComponent(site.platform)}`,
-    {
-      'X-No-Authorization': 'true',
-      'X-No-User-Id': 'true',
-      'X-No-Enterprise-Id': 'true',
-      'X-No-Department-Info': 'true',
-    },
-    {},
-  )
+  const state = await call(site, 'POST', `/v2/plugin/auth/state?platform=${encodeURIComponent(site.platform)}`, {
+    'X-No-Authorization': 'true', 'X-No-User-Id': 'true', 'X-No-Enterprise-Id': 'true', 'X-No-Department-Info': 'true',
+  }, {})
   if (!state?.state || !state?.authUrl) throw new Error(`${site.name} 未返回登录授权地址`)
   const url = new URL(String(state.authUrl))
   if (url.protocol !== 'https:') throw new Error(`${site.name} 登录链接必须使用 HTTPS`)
   url.searchParams.set('version', site.app)
   url.searchParams.set('loginSessionId', hex())
-  return {
-    realm: site.realm,
-    state: String(state.state),
-    authUrl: url.toString(),
-    createdAt: Date.now(),
-  }
+  return { realm: site.realm, state: String(state.state), authUrl: url.toString(), createdAt: Date.now() }
 }
 
 export async function pollBrowserAuthStep(
@@ -219,7 +355,7 @@ export async function pollBrowserAuthStep(
       const token = await call(site, 'GET', `/v2/plugin/auth/token?state=${q}`)
       if (!token || !Object.keys(token).length) return { status: 'pending' }
       if (!token.accessToken) return { status: 'expired', error: `${site.name} 未返回访问令牌` }
-      pending.token = mergeToken({ access: '' }, token)
+      pending.token = mergeToken({ access: '', source: 'browser' }, token)
     } catch (e: any) {
       if (Number(e?.code) === 11217 || e?.status === 408 || e?.status === 429) return { status: 'pending' }
       throw e
@@ -228,10 +364,7 @@ export async function pollBrowserAuthStep(
   try {
     const a = pending.token
     const who = await call(site, 'GET', `/v2/plugin/login/account?state=${q}`, {
-      Authorization: `Bearer ${a.access}`,
-      'X-Domain': domainOf(site, a),
-      'X-No-User-Id': 'true',
-      'X-No-Enterprise-Id': 'true',
+      Authorization: `Bearer ${a.access}`, 'X-Domain': domainOf(site, a), 'X-No-User-Id': 'true', 'X-No-Enterprise-Id': 'true',
     })
     if (!who || !Object.keys(who).length) return { status: 'scanned' }
     const uid = String(who.uid ?? '')
@@ -239,14 +372,7 @@ export async function pollBrowserAuthStep(
     const nickname = accountName(who, ent) || site.name
     return {
       status: 'success',
-      account: {
-        ...a,
-        realm: site.realm,
-        uid,
-        nickname,
-        ...(ent.id ? { enterpriseId: ent.id } : {}),
-        ...(ent.name ? { enterpriseName: ent.name } : {}),
-      },
+      account: { ...a, realm: site.realm, uid, nickname, ...(ent.id ? { enterpriseId: ent.id } : {}), ...(ent.name ? { enterpriseName: ent.name } : {}) },
     }
   } catch (e: any) {
     if (Number(e?.code) === 12151 || e?.status === 408 || e?.status === 429) return { status: 'scanned' }
@@ -254,41 +380,4 @@ export async function pollBrowserAuthStep(
   }
 }
 
-function num(v: unknown): number {
-  const n = Number(v)
-  return Number.isFinite(n) && n >= 0 ? n : 0
-}
-
-export async function fetchAccountCredits(site: SiteConfig, a: AccountIdentity): Promise<number | null> {
-  try {
-    const sum = await call(site, 'POST', '/billing/meter/get-user-resource-summary', {
-      Authorization: `Bearer ${a.access}`,
-      'X-User-Id': a.uid ?? '',
-      'X-Domain': domainOf(site, a),
-      'X-Product': 'SaaS',
-      'X-IDE-Type': 'WorkBuddy',
-      ...enterpriseHeaders(a),
-    }, {})
-    const packages = Array.isArray(sum?.Packages) ? sum.Packages : []
-    if (packages.length > 0) {
-      let remain = 0
-      for (const p of packages) remain += num(p?.CycleRemainCapacity ?? p?.CycleCapacityRemainPrecise)
-      return Math.round(remain * 100) / 100
-    }
-    if (a.enterpriseId) {
-      const ent = await call(site, 'POST', '/billing/meter/get-enterprise-user-usage', {
-        Authorization: `Bearer ${a.access}`,
-        'X-User-Id': a.uid ?? '',
-        'X-Domain': domainOf(site, a),
-        'X-Product': 'SaaS',
-        'X-IDE-Type': 'WorkBuddy',
-        ...enterpriseHeaders(a),
-      }, {})
-      const limit = num(ent?.limitNum)
-      if (limit > 0) return Math.max(0, Math.round((limit - num(ent?.credit)) * 100) / 100)
-    }
-    return null
-  } catch {
-    return null
-  }
-}
+export { checkinOf, edgeNotes, fetchAccountCredits, fetchAccountUsage, unanswered } from './billing.js'

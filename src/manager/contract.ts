@@ -9,9 +9,13 @@ export const managerRequest = z.discriminatedUnion('action', [
   z.object({ action: z.literal('bridge') }),
   z.object({ action: z.literal('authStart'), realm: z.enum(['cn', 'global']) }),
   z.object({ action: z.literal('authPoll') }),
+  z.object({ action: z.literal('authDesktop'), realm: z.enum(['cn', 'global']) }),
+  z.object({ action: z.literal('authKey'), realm: z.enum(['cn', 'global']), key: z.string().min(1).max(512), nickname: z.string().max(120).optional() }),
   z.object({ action: z.literal('accountDisabled'), file: accountFile, disabled: z.boolean() }),
   z.object({ action: z.literal('accountDelete'), file: accountFile }),
   z.object({ action: z.literal('accountRefresh'), file: accountFile.optional() }),
+  z.object({ action: z.literal('accountCheckin'), file: accountFile.optional() }),
+  z.object({ action: z.literal('gatewayOptions'), freeOnly: z.boolean().optional(), hideDsh: z.boolean().optional() }),
 ])
 export type ManagerRequest = z.infer<typeof managerRequest>
 

@@ -12,18 +12,25 @@ interface Account {
   nickname: string
   note: string
   realm: string
+  source?: string
   disabled: boolean
   blocked: boolean
   expired: boolean
   inPool: boolean
   cooling: boolean
+  coolingModels?: string[]
   credits: number | null
+  creditsUpdatedAt?: number
+  creditsError?: string
+  cycleEnd?: string
+  runsOutAt?: string
 }
 interface Overview {
   accounts: Account[]
   gatewayURL: string
   poolAvailable: boolean
   manageable: boolean
+  options?: { freeOnly: boolean; hideDsh: boolean }
 }
 interface Props {
   remote: AppRemote
@@ -40,6 +47,7 @@ export function accountStatus(account: Account, poolAvailable: boolean): string 
   if (!account.inPool && !poolAvailable) return '不可用'
   if (!account.inPool) return '未进入账号池'
   if (account.cooling) return '冷却中'
+  if (account.coolingModels?.length) return `部分模型限流 (${account.coolingModels.join(', ')})`
   return '可用'
 }
 
@@ -57,6 +65,8 @@ export async function copyLoginLink(url: string, clipboard: Pick<Clipboard, 'wri
 export function Management({ remote, writable, disabled, onBusyChange, onConnect }: Props) {
   const [overview, setOverview] = useState<Overview>()
   const [realm, setRealm] = useState<'cn' | 'global'>('cn')
+  const [apiKeyInput, setApiKeyInput] = useState('')
+  const [apiKeyNote, setApiKeyNote] = useState('')
   const [authorization, setAuthorization] = useState<{ url: string; qr: string }>()
   const authorizationRef = useRef(authorization)
   authorizationRef.current = authorization
@@ -160,6 +170,23 @@ export function Management({ remote, writable, disabled, onBusyChange, onConnect
     setQrStatus('等待扫码或打开登录链接并确认…')
   })
 
+  const importDesktop = () => run(async () => {
+    await call({ action: 'authDesktop', realm })
+    await refresh()
+    await onConnect(() => true)
+    setMessage('已导入本机 WorkBuddy 桌面端登录并完成模型同步。')
+  })
+
+  const importApiKey = () => run(async () => {
+    const raw = apiKeyInput.trim()
+    if (!raw) throw new Error('请输入 WorkBuddy API Key。')
+    await call({ action: 'authKey', realm, key: raw, nickname: apiKeyNote.trim() || undefined })
+    setApiKeyInput(''); setApiKeyNote('')
+    await refresh()
+    await onConnect(() => true)
+    setMessage('已添加 WorkBuddy API Key 账号并完成模型同步。')
+  })
+
   const copyAuthorization = async () => {
     if (!authorization) return
     const copied = await copyLoginLink(authorization.url, navigator.clipboard)
@@ -187,9 +214,26 @@ export function Management({ remote, writable, disabled, onBusyChange, onConnect
   }
 
   const refreshAccounts = () => run(async () => {
-    await call({ action: 'accountRefresh' })
+    const res = await call({ action: 'accountRefresh' }) as { results?: Array<{ ok: boolean; error?: string }> }
     await refresh()
-    setMessage('账号状态与积分已刷新。')
+    const failed = (res.results ?? []).filter(r => !r.ok)
+    if (failed.length > 0) setFailure(`有 ${failed.length} 个账号刷新异常：${failed[0].error || '未知错误'}`)
+    else setMessage('账号状态与积分已刷新。')
+  })
+
+  const checkinAccounts = (file?: string) => run(async () => {
+    const res = await call({ action: 'accountCheckin', ...(file ? { file } : {}) }) as { results?: Array<{ nickname: string; outcome: string; credit?: number; message?: string }> }
+    await refresh()
+    const items = res.results ?? []
+    const summary = items.map(r => `${r.nickname}: ${r.outcome === 'claimed' ? `签到成功${r.credit ? ` (+${r.credit})` : ''}` : r.outcome === 'done' ? '今日已签' : r.message || r.outcome}`).join('；')
+    setMessage(summary || '每日签到已执行。')
+  })
+
+  const toggleGatewayOption = (field: 'freeOnly' | 'hideDsh', value: boolean) => run(async () => {
+    await call({ action: 'gatewayOptions', [field]: value })
+    await refresh()
+    if (field === 'freeOnly' && writable) await onConnect(() => true)
+    setMessage('本地网关策略已更新。')
   })
 
   const syncPoolModels = () => run(async () => {
@@ -197,7 +241,8 @@ export function Management({ remote, writable, disabled, onBusyChange, onConnect
     setMessage('本地网关已连接并同步模型到 DSH。')
   })
 
-  const usableAccounts = overview?.accounts.filter(account => accountStatus(account, overview.poolAvailable) === '可用').length ?? 0
+  const usableAccounts = overview?.accounts.filter(account => !account.disabled && !account.blocked && !account.expired && account.inPool).length ?? 0
+  const hasCnAccount = overview?.accounts.some(a => a.realm === 'cn') ?? false
 
   return <>
     {overview && <section className="wb-summary" aria-label="账号池概览">
@@ -216,8 +261,19 @@ export function Management({ remote, writable, disabled, onBusyChange, onConnect
         <div className="wb-actions">
           <button type="button" disabled={blocked || !writable} onClick={() => void syncPoolModels()}>同步账号池模型</button>
           <button type="button" disabled={blocked} onClick={() => void refreshAccounts()}>刷新状态与积分</button>
+          {hasCnAccount && <button type="button" disabled={blocked} onClick={() => void checkinAccounts()}>国内版每日签到</button>}
         </div>
       </div>
+      {overview?.options && <div className="wb-actions" style={{ marginBottom: '8px' }}>
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+          <input type="checkbox" checked={overview.options.freeOnly} disabled={blocked} onChange={e => void toggleGatewayOption('freeOnly', e.target.checked)} />
+          仅免费模型 (Free models only)
+        </label>
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+          <input type="checkbox" checked={overview.options.hideDsh} disabled={blocked} onChange={e => void toggleGatewayOption('hideDsh', e.target.checked)} />
+          隐去 DSH 标识 (Hide DSH name)
+        </label>
+      </div>}
       {failure && <p className="wb-error" role="alert">{failure}</p>}
       {message && <p className="wb-success" role="status">{message}</p>}
       {overview && (overview.accounts.length === 0 ? <p className="wb-empty">当前账号池中没有账号。</p> : <ul className="wb-records">{overview.accounts.map(account => <li key={account.file}>
@@ -228,9 +284,12 @@ export function Management({ remote, writable, disabled, onBusyChange, onConnect
             {' · '}
             {accountStatus(account, overview.poolAvailable)}
             {account.credits !== null ? ` · 剩余额度 ${account.credits.toLocaleString()}` : ''}
+            {account.cycleEnd ? ` · 重置 ${account.cycleEnd.slice(0, 10)}` : ''}
+            {account.creditsError ? ` · 额度异常: ${account.creditsError}` : ''}
           </p>
         </div>
         <div className="wb-actions">
+          {account.realm === 'cn' && account.source !== 'key' && <button type="button" disabled={blocked} onClick={() => void checkinAccounts(account.file)}>签到</button>}
           <button type="button" disabled={blocked} onClick={() => toggleAccount(account)}>{account.disabled || account.blocked ? '启用' : '停用'}</button>
           <button type="button" disabled={blocked} onClick={() => deleteAccount(account)}>移除</button>
         </div>
@@ -246,6 +305,7 @@ export function Management({ remote, writable, disabled, onBusyChange, onConnect
           </label>
           <div className="wb-actions">
             <button type="button" disabled={blocked} onClick={() => void startAuth()}>获取登录链接或扫码</button>
+            <button type="button" disabled={blocked} onClick={() => void importDesktop()}>导入本机桌面端登录</button>
           </div>
           {authorization && <div className="wb-detail-body">
             {authorization.qr && <img src={authorization.qr} width="200" height="200" alt="WorkBuddy 账号授权二维码" />}
@@ -260,6 +320,15 @@ export function Management({ remote, writable, disabled, onBusyChange, onConnect
             <p className="wb-muted" role="status">{qrStatus}</p>
             {copyStatus && <p className="wb-muted" role="status">{copyStatus}</p>}
           </div>}
+          <div className="wb-detail-body" style={{ marginTop: '8px' }}>
+            <label htmlFor="workbuddy-api-key">或添加 API Key 账号
+              <input id="workbuddy-api-key" type="password" placeholder="输入 WorkBuddy API Key" value={apiKeyInput} disabled={blocked} onChange={e => setApiKeyInput(e.target.value)} />
+            </label>
+            <div className="wb-actions">
+              <input placeholder="备注名称（可选）" value={apiKeyNote} disabled={blocked} onChange={e => setApiKeyNote(e.target.value)} />
+              <button type="button" disabled={blocked || !apiKeyInput.trim()} onClick={() => void importApiKey()}>添加 API Key</button>
+            </div>
+          </div>
         </div>
       </details>
     </section>

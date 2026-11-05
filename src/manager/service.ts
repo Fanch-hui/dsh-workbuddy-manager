@@ -2,10 +2,13 @@ import type { Context } from '@deepseek-ai/cordis'
 import { Remote, RemoteError, TypertRemoteService, principalOf } from '@deepseek-ai/dsh-typert-protocol'
 import { BRIDGE_CREDENTIAL_REF, BRIDGE_PROVIDER } from '../address.js'
 import {
-  fetchAccountCredits,
+  checkinOf,
+  fetchAccountUsage,
   fresh,
+  keyAccount,
+  notDesktop,
   pollBrowserAuthStep,
-  refreshRefused,
+  readDesktop,
   startBrowserAuth,
   type PendingAuth,
 } from '../gateway/oauth.js'
@@ -56,6 +59,24 @@ export class ManagerRemote extends TypertRemoteService {
       headers.set('authorization', `Bearer ${this.gateway.token}`)
       return headers
     })
+
+    void this.bootstrapGateway()
+  }
+
+  private async bootstrapGateway(): Promise<void> {
+    try {
+      const [accounts, meta] = await Promise.all([this.pool.listAccounts(), this.pool.gatewayMeta()])
+      if (accounts.length === 0 && !meta.port && !meta.keyRef) return
+      await this.gateway.ensureStarted(meta.port ?? 0)
+      const credentials = this.ctx.get('credentials' as never) as unknown as CredentialStoreLike | undefined
+      const ref = meta.keyRef || BRIDGE_CREDENTIAL_REF
+      if (credentials?.set) {
+        await credentials.set(ref, this.gateway.token).catch(() => {})
+      }
+      if (this.gateway.listeningPort !== meta.port) {
+        await this.pool.saveGatewayMeta(this.gateway.listeningPort, ref)
+      }
+    } catch {}
   }
 
   private isGatewayRequest(request: { provider?: string; baseURL?: string }): boolean {
@@ -85,9 +106,13 @@ export class ManagerRemote extends TypertRemoteService {
       case 'bridge': return this.issueBridge()
       case 'authStart': return this.authStart(request.realm)
       case 'authPoll': return this.authPoll()
+      case 'authDesktop': return this.authDesktop(request.realm)
+      case 'authKey': return this.authKey(request.realm, request.key, request.nickname)
       case 'accountDisabled': return this.accountDisabled(request.file, request.disabled)
       case 'accountDelete': return this.accountDelete(request.file)
       case 'accountRefresh': return this.accountRefresh(request.file)
+      case 'accountCheckin': return this.accountCheckin(request.file)
+      case 'gatewayOptions': return this.updateGatewayOptions(request.freeOnly, request.hideDsh)
     }
   }
 
@@ -109,13 +134,17 @@ export class ManagerRemote extends TypertRemoteService {
   }
 
   private async overview(): Promise<unknown> {
-    const gatewayURL = await this.ensureGateway()
-    const accounts = await this.pool.listAccountItems()
+    const [gatewayURL, accounts, options] = await Promise.all([
+      this.ensureGateway(),
+      this.pool.listAccountItems(),
+      this.pool.getGatewayOptions(),
+    ])
     return {
       accounts,
       gatewayURL,
       poolAvailable: accounts.some(a => a.inPool),
       manageable: true,
+      options,
     }
   }
 
@@ -169,17 +198,54 @@ export class ManagerRemote extends TypertRemoteService {
     }
     if (step.status === 'success' && step.account) {
       this.pending = undefined
-      const credits = await fetchAccountCredits(site, step.account)
-      const saved = await this.pool.upsertSignedIn(step.account, credits)
+      const usage = await fetchAccountUsage(site, step.account)
+      const saved = await this.pool.upsertSignedIn(step.account, usage.credits, {
+        creditsUpdatedAt: Date.now(),
+        creditsError: usage.error,
+        cycleEnd: usage.cycleEnd,
+        runsOutAt: usage.runsOutAt,
+      })
       return { status: 'success', account: toAccountItem(saved) }
     }
     return { status: step.status }
   }
 
+  private async authDesktop(realm: Realm): Promise<unknown> {
+    const site = this.sites[realm] ?? this.sites.cn
+    const d = readDesktop(site)
+    if (!d) fail(notDesktop(site))
+    const usage = await fetchAccountUsage(site, d)
+    const saved = await this.pool.upsertSignedIn(
+      {
+        ...d,
+        realm,
+        uid: d.uid,
+        nickname: `${d.name} (桌面端)`,
+        source: 'desktop',
+      },
+      usage.credits,
+      {
+        creditsUpdatedAt: Date.now(),
+        creditsError: usage.error,
+        cycleEnd: usage.cycleEnd,
+        runsOutAt: usage.runsOutAt,
+      },
+    )
+    return { ok: true, account: toAccountItem(saved) }
+  }
+
+  private async authKey(realm: Realm, rawKey: string, nickname?: string): Promise<unknown> {
+    if (!/^[\x21-\x7e]+$/.test(rawKey.trim())) fail('API Key 不能包含空格或非 ASCII 字符。')
+    const account = keyAccount(rawKey, realm, nickname)
+    if (!account) fail('请输入有效的 API Key。')
+    const saved = await this.pool.upsertSignedIn(account, null, { source: 'key' })
+    return { ok: true, account: toAccountItem(saved) }
+  }
+
   private async accountDisabled(file: string, disabled: boolean): Promise<unknown> {
     const updated = await this.pool.updateAccount(file, {
       disabled,
-      ...(disabled ? {} : { restricted: false, coolingUntil: undefined }),
+      ...(disabled ? {} : { restricted: false, coolingUntil: undefined, modelCooling: undefined }),
     })
     if (!updated) fail('找不到指定的 WorkBuddy 账号。')
     return { ok: true }
@@ -195,22 +261,56 @@ export class ManagerRemote extends TypertRemoteService {
     const accounts = await this.pool.listAccounts()
     const targets = file ? accounts.filter(a => a.id === file) : accounts
     if (file && targets.length === 0) fail('找不到指定的 WorkBuddy 账号。')
+    const results: Array<{ file: string; ok: boolean; credits: number | null; error?: string }> = []
     for (const a of targets) {
       const site = this.sites[a.realm] ?? this.sites.cn
+      const usage = await fetchAccountUsage(site, a, {
+        getAccount: () => this.pool.getAccount(a.id),
+        saveAccount: async u => { await this.pool.updateAccount(a.id, { ...u, expired: false }) },
+      })
+      const expired = usage.signIn === 'expired'
+      await this.pool.updateAccount(a.id, {
+        ...(usage.updatedAccount ?? {}),
+        expired,
+        creditsUpdatedAt: Date.now(),
+        creditsError: usage.error,
+        ...(usage.credits !== null ? { credits: usage.credits } : {}),
+        ...(usage.cycleEnd ? { cycleEnd: usage.cycleEnd } : {}),
+        ...(usage.runsOutAt ? { runsOutAt: usage.runsOutAt } : {}),
+      })
+      results.push({
+        file: a.id,
+        ok: !usage.error,
+        credits: usage.credits ?? a.credits ?? null,
+        ...(usage.error ? { error: usage.error } : {}),
+      })
+    }
+    return { ok: true, results }
+  }
+
+  private async accountCheckin(file?: string): Promise<unknown> {
+    const accounts = await this.pool.listAccounts()
+    const targets = (file ? accounts.filter(a => a.id === file) : accounts).filter(a => a.realm === 'cn')
+    if (file && targets.length === 0) fail('找不到支持每日签到的国内版 WorkBuddy 账号。')
+    const results: Array<{ file: string; nickname: string; outcome: string; credit?: number; streak?: number; message?: string }> = []
+    for (const a of targets) {
+      const site = this.sites.cn
       try {
-        const next = await fresh(site, a, async u => {
-          await this.pool.updateAccount(a.id, { ...u, expired: false })
-        })
-        const credits = await fetchAccountCredits(site, { ...a, ...next })
-        await this.pool.updateAccount(a.id, {
-          ...next,
-          expired: false,
-          ...(credits !== null ? { credits } : {}),
-        })
-      } catch (error) {
-        if (refreshRefused(error)) await this.pool.updateAccount(a.id, { expired: true })
+        const refreshed = await fresh(site, a, async u => { await this.pool.updateAccount(a.id, { ...u, expired: false }) })
+        const res = await checkinOf(site, { ...a, ...refreshed })
+        if (res.outcome === 'claimed' && typeof res.credit === 'number' && typeof a.credits === 'number') {
+          await this.pool.updateAccount(a.id, { credits: Math.round((a.credits + res.credit) * 100) / 100 })
+        }
+        results.push({ file: a.id, nickname: a.nickname, ...res })
+      } catch (e: any) {
+        results.push({ file: a.id, nickname: a.nickname, outcome: 'failed', message: e?.message ?? String(e) })
       }
     }
-    return { ok: true }
+    return { ok: true, results }
+  }
+
+  private async updateGatewayOptions(freeOnly?: boolean, hideDsh?: boolean): Promise<unknown> {
+    const options = await this.pool.saveGatewayOptions({ freeOnly, hideDsh })
+    return { ok: true, options }
   }
 }

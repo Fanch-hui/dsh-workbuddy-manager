@@ -34,6 +34,7 @@ export interface Connection {
   keyWritable: boolean
   writable: boolean
   existing: boolean
+  hasUnsupportedCompat?: boolean
   models: Model[]
   revision: unknown
 }
@@ -89,6 +90,7 @@ export async function loadConnection(remote: Remote, selectedId?: string): Promi
   if (!providerId && candidates.length === 0) providerId = PROVIDER
   const raw = record(providers[providerId])
   const existing = Object.keys(raw).length > 0
+  const hasUnsupportedCompat = 'supportsMaxOutputTokens' in record(raw.compat)
   const keyRef = typeof raw.apiKeyEnv === 'string' && raw.apiKeyEnv ? raw.apiKeyEnv : CREDENTIAL_REF
   const credential = result(await remote.credentials.describe([keyRef]))[keyRef]
   return {
@@ -101,6 +103,7 @@ export async function loadConnection(remote: Remote, selectedId?: string): Promi
     keyWritable: credential?.writable === true,
     writable: settings.writable,
     existing,
+    hasUnsupportedCompat,
     models: modelsOf(raw.models),
     revision: namespace.revision,
   }
@@ -140,11 +143,18 @@ export async function discover(remote: Remote, connection: Connection, address: 
   return [...unique.values()]
 }
 
-/** Preserve existing model settings; append newly advertised models. */
+/** Preserve existing model settings; backfill newly advertised capabilities and append new models. */
 export function mergeModels(current: Model[], discovered: Model[]): Model[] {
-  const models = new Map(current.map(model => [model.id, model]))
+  const models = new Map(current.map(model => [model.id, { ...model }]))
   for (const model of discovered) {
-    if (!models.has(model.id)) models.set(model.id, model)
+    const existing = models.get(model.id)
+    if (!existing) {
+      models.set(model.id, model)
+      continue
+    }
+    if (existing.contextWindow === undefined && model.contextWindow !== undefined) existing.contextWindow = model.contextWindow
+    if (existing.maxTokens === undefined && model.maxTokens !== undefined) existing.maxTokens = model.maxTokens
+    if (existing.input === undefined && model.input !== undefined) existing.input = model.input
   }
   return [...models.values()]
 }
@@ -166,10 +176,18 @@ export async function attachCredential(remote: Remote, connection: Connection, a
   if (!connection.providerId) throw new Error('请先选择已有的 WorkBuddy 提供方。')
   if (!connection.writable) throw new Error('当前 DSH 配置不可写。')
   const api = apiOf(connection.providerId, connection.api)
-  const operations: Array<{ op: 'set'; path: string[]; value: unknown }> = connection.existing && connection.providerId !== BRIDGE_PROVIDER
+  const operations: Array<{ op: 'set'; path: string[]; value: unknown }> = connection.existing
     ? [
         { op: 'set', path: ['providers', connection.providerId, 'apiKeyEnv'], value: ref },
         { op: 'set', path: ['providers', connection.providerId, 'baseURL'], value: baseURL },
+        ...(connection.providerId === BRIDGE_PROVIDER
+          ? [
+              { op: 'set' as const, path: ['providers', connection.providerId, 'api'], value: api },
+              ...(connection.hasUnsupportedCompat
+                ? [{ op: 'set' as const, path: ['providers', connection.providerId, 'compat'], value: {} }]
+                : []),
+            ]
+          : []),
       ]
     : [{
         op: 'set',
@@ -179,7 +197,7 @@ export async function attachCredential(remote: Remote, connection: Connection, a
           baseURL,
           api,
           apiKeyEnv: ref,
-          models: connection.existing ? connection.models : [],
+          models: [],
         }),
       }]
   const updated = await remote.settings.mutate(NAMESPACE, operations, connection.revision)

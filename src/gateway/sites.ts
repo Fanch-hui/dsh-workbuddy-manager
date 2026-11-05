@@ -9,12 +9,14 @@ export interface SiteConfig {
   realm: Realm
   name: string
   endpoint: string
+  authID: string
   platform: string
   ai: boolean
   app: string
   cli: string
   appName: string
   runtime: string
+  keys: string
   models: ReadonlyArray<ModelTuple>
   noImages?: RegExp
   messages?: boolean
@@ -31,6 +33,7 @@ export interface ModelSpec {
   rateWas?: number
   efforts?: string[]
   effort?: string
+  native?: boolean
 }
 
 export interface AccountIdentity {
@@ -43,7 +46,7 @@ export interface AccountIdentity {
   enterpriseId?: string
   enterpriseName?: string
   tokenType?: string
-  source?: string
+  source?: 'browser' | 'desktop' | 'key' | string
   key?: string
 }
 
@@ -90,12 +93,14 @@ export const SITES: Record<Realm, SiteConfig> = {
     realm: 'cn',
     name: 'WorkBuddy',
     endpoint: 'https://copilot.tencent.com',
+    authID: 'workbuddy-desktop',
     platform: 'workbuddy',
     ai: false,
     app: '5.9.3',
     cli: '2.165.0',
     appName: 'WorkBuddy',
     runtime: 'local-agent',
+    keys: 'https://www.workbuddy.cn/profile/keys',
     models: CN_MODELS,
     messages: true,
   },
@@ -104,12 +109,14 @@ export const SITES: Record<Realm, SiteConfig> = {
     realm: 'global',
     name: 'WorkBuddy AI',
     endpoint: 'https://www.workbuddy.ai',
+    authID: 'workbuddy-desktop-ai',
     platform: 'workbuddy-ai',
     ai: true,
     app: '5.9.3',
     cli: '2.165.0',
     appName: 'workbuddy-ai',
     runtime: 'local-agent',
+    keys: 'https://www.workbuddy.ai/profile/keys',
     models: AI_MODELS,
     noImages: /^glm-/,
   },
@@ -124,6 +131,9 @@ const SDK_ARCH: Record<string, string> = { x64: 'x64', arm64: 'arm64', arm: 'arm
 
 export const hex = (): string => randomBytes(16).toString('hex')
 export const textOnly = (site: SiteConfig, model: string): boolean => Boolean(site.noImages?.test(model))
+export const nativeOf = (site: SiteConfig | undefined, model: unknown): boolean =>
+  Boolean(site?.messages === true && /^claude-/i.test(String(model ?? '')))
+export const remoteConfig = (key?: string): boolean => Boolean(key && /^(ck_|pt_)/.test(key))
 export const domainOf = (site: SiteConfig, a: AccountIdentity): string => a.domain || new URL(`${site.endpoint}/v2`).host
 
 export function enterpriseHeaders(a?: AccountIdentity): Record<string, string> {
@@ -171,12 +181,65 @@ export function chatHeaders(site: SiteConfig, headers: Headers): void {
   headers.set('X-Stainless-Runtime-Version', NODE_RUNTIME)
 }
 
+export function creditsOf(c: unknown): number | undefined {
+  if (c == null || c === '') return undefined
+  const s = String(c).trim().toLowerCase().replace(/\s+credits?$/, '').replace(/^x/, '')
+  const n = Number(s)
+  return s !== '' && Number.isFinite(n) && n >= 0 ? n : undefined
+}
+
+export const freeCredits = (c: unknown): boolean => creditsOf(c) === 0
+
+function discountOf(p: any, base?: number): number | undefined {
+  const said = creditsOf(String(p?.discount?.discountedCredits ?? '').trim().replace(/x$/i, ''))
+  if (said !== undefined) return said
+  const f = Number(p?.discount?.factor)
+  return Number.isFinite(f) && f >= 0 && base !== undefined ? base * f : undefined
+}
+
+function running(p: any, now: number): boolean {
+  if (!p || p.enabled === false) return false
+  const from = Date.parse(p.schedule?.validFrom ?? '')
+  const until = Date.parse(p.schedule?.validUntil ?? '')
+  return !(from > now) && !(until <= now)
+}
+
+export function priceOf(d: Record<string, any>, promotions?: any[], now = Date.now()): { free?: boolean; rate?: number; rateWas?: number } {
+  const base = creditsOf(d.credits)
+  const mine = (Array.isArray(promotions) ? promotions : []).filter(
+    p => p?.kind === 'discount' && Array.isArray(p.modelIds) && p.modelIds.includes(d.id) && running(p, now),
+  )
+  if (mine.some(p => Array.isArray(p.schedule?.daily) && p.schedule.daily.length)) {
+    const night = mine.filter(p => p.discount && Array.isArray(p.schedule?.daily) && p.schedule.daily.length)
+    if (base === undefined || (base === 0 && night.some(p => discountOf(p, base) === 0))) return { free: false }
+    return { free: false, rate: base }
+  }
+  const off = mine.filter(p => p.discount).map(p => discountOf(p, base)).filter((r): r is number => r !== undefined)
+  if (off.length) {
+    const r = Math.min(...off)
+    return { free: r === 0, rate: r, ...(base !== undefined && base > r ? { rateWas: base } : {}) }
+  }
+  if (base === undefined) return {}
+  return { free: base === 0, rate: base }
+}
+
+export function notFree(site: SiteConfig, model?: string, why?: string): Response {
+  const msg = why
+    ? `${site.name}'s model list couldn't be read (${why}), so whether model ${model || '(none)'} is free is unknown; with "Free models only" on it isn't sent`
+    : `model ${model || '(none)'} is not available while "Free models only" is on: ${site.name} charges for it. Turn the switch off in ${site.name}'s provider settings to use it`
+  return new Response(JSON.stringify({ error: { message: msg, type: 'invalid_request_error', code: why ? 'free_only_unknown' : 'model_not_found' } }), {
+    status: why ? 503 : 404,
+    headers: { 'content-type': 'application/json', 'X-Magpie-Sign-In': 'kept' },
+  })
+}
+
 export function fallbackModels(site: SiteConfig): ModelSpec[] {
   return site.models.map(([id, name, context, efforts]) => ({
     id,
     name,
     context,
     images: !textOnly(site, id),
+    ...(nativeOf(site, id) ? { native: true } : {}),
     ...(efforts ? { efforts: [...efforts] } : {}),
   }))
 }
@@ -184,7 +247,7 @@ export function fallbackModels(site: SiteConfig): ModelSpec[] {
 function effortsOf(d: Record<string, any>, site: SiteConfig, id: string): string[] {
   const said = d.reasoning?.supportedEfforts
   if (Array.isArray(said) && said.length) {
-    if (site.messages && /^claude-/i.test(id) && !said.includes('max')) return [...said, 'max']
+    if (nativeOf(site, id) && !said.includes('max')) return [...said, 'max']
     return said
   }
   if (d.supportsReasoning !== true) return []
@@ -214,11 +277,12 @@ export async function liveModels(site: SiteConfig, a: AccountIdentity): Promise<
     if (agent.name !== 'cli') continue
     for (const id of agent.models ?? []) {
       const d = (cfg.models ?? []).find((x: any) => x.id === id)
-      const m: ModelSpec = { id, name: d?.name || id }
+      const m: ModelSpec = { id, name: d?.name || id, ...(nativeOf(site, id) ? { native: true } : {}) }
       if (d) {
         if (typeof d.maxInputTokens === 'number' && d.maxInputTokens > 0) m.context = d.maxInputTokens
         if (typeof d.maxOutputTokens === 'number' && d.maxOutputTokens > 0) m.output = d.maxOutputTokens
         m.images = d.supportsImages === true && !textOnly(site, id)
+        Object.assign(m, priceOf(d, cfg.modelPromotions))
         const es = effortsOf(d, site, id)
         if (es.length) {
           const canOff = d.reasoning?.canDisableThinking
@@ -234,10 +298,7 @@ export async function liveModels(site: SiteConfig, a: AccountIdentity): Promise<
   const first = new Map<string, string>()
   for (const m of out) {
     const id = first.get(m.name)
-    if (id === undefined) {
-      first.set(m.name, m.id)
-      continue
-    }
+    if (id === undefined) { first.set(m.name, m.id); continue }
     const rest = m.id.startsWith(`${id}-`) ? m.id.slice(id.length + 1) : ''
     m.name = `${m.name} (${rest ? rest.toUpperCase() : m.id})`
   }

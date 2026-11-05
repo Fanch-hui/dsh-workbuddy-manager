@@ -10,7 +10,7 @@
 
 ## 桌面版安装
 
-1. 从仓库执行 `npm pack`，生成 `dsh-workbuddy-manager-0.3.0.tgz`；发布后也可直接安装对应包名。
+1. 从仓库执行 `npm pack`，生成 `dsh-workbuddy-manager-0.3.1.tgz`；发布后也可直接安装对应包名。
 2. 在 DSH 插件页面添加安装包，确认插件已启用，重启 DSH。
 3. 打开 **设置 → WorkBuddy**。本机网关可填写 `http://127.0.0.1:7864`，插件自动补全 `/v1`；远程网关使用 HTTPS。
 4. 在**管理服务**中使用管理用户名和密码登录。管理员可查看和启停账号、扫码添加账号、查看及启停网关密钥；新建密钥默认不限额度，创建时需要确认。
@@ -30,7 +30,7 @@
 
 ```sh
 npm pack
-dsh plugin --profile demo add ./dsh-workbuddy-manager-0.3.0.tgz
+dsh plugin --profile demo add ./dsh-workbuddy-manager-0.3.1.tgz
 # 发布后：dsh plugin --profile demo add dsh-workbuddy-manager
 ```
 

@@ -4,12 +4,16 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createRequire } from 'node:module'
 import { test } from 'node:test'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import YAML from 'yaml'
 import { validatePackage } from '../scripts/check-package.mjs'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
+const cordis = process.env.DSH_RUNTIME_ROOT
+  ? pathToFileURL(join(process.env.DSH_RUNTIME_ROOT, 'node_modules/@deepseek-ai/cordis/lib/index.js')).href
+  : '@deepseek-ai/cordis'
+const { Context, Service } = await import(cordis)
 
 test('真实 bundle 和桌面客户端入口符合打包约定', () => {
   const { errors, checks } = validatePackage(root)
@@ -34,7 +38,7 @@ test('Node 包入口保留原客户端接口', async () => {
   assert.equal(typeof rootEntry.apply, 'function')
 })
 
-test('客户端构建产物挂载管理接口并注册设置页面', async () => {
+test('客户端构建产物挂载管理接口并注册设置页面', { timeout: 5000 }, async () => {
   const code = readFileSync(join(root, 'lib/ui-bundle.js'), 'utf8')
   let module
   const window = { __ModuleLoader__: { load(spec) { module = spec } } }
@@ -42,22 +46,60 @@ test('客户端构建产物挂载管理接口并注册设置页面', async () =>
   assert.equal(module.id, 'dsh-workbuddy-manager')
   const plugin = module.factory(createRequire(import.meta.url))
   let registration
+  let resolveRegistration
+  const registered = new Promise(resolve => { resolveRegistration = resolve })
   let contribution
   let unmounted = false
-  const ctx = {
-    remote: { $mount: async value => { contribution = value; return async () => { unmounted = true } } },
-    slots: {
-      inject(name, fn) { assert.equal(name, 'settings.section'); fn() },
-      register(options, component) { registration = { options, component } },
-    },
+  let withdrawn = false
+  const ctx = new Context()
+  class Remote extends Service {
+    constructor(context) { super(context, 'remote') }
+    async $mount(value) {
+      contribution = value
+      const namespace = this.ctx.plugin(context => {
+        context.provide('remote.workbuddy', { manage: async request => request })
+      })
+      await namespace
+      return async () => {
+        assert.equal(withdrawn, true, '卸载接口前应先撤销界面')
+        await namespace.dispose()
+        unmounted = true
+      }
+    }
   }
-  const dispose = await plugin.apply(ctx)
+  class Slots extends Service {
+    constructor(context) { super(context, 'slots') }
+    inject(name, fn) { assert.equal(name, 'settings.section'); fn() }
+    register(options, component) {
+      registration = { options, component }
+      this.ctx.effect(() => () => { withdrawn = true })
+      resolveRegistration()
+    }
+  }
+  ctx.plugin(Remote)
+  ctx.plugin(Slots)
+  for (const name of ['remote.credentials', 'remote.llm', 'remote.settings']) ctx.provide(name, {})
+  const scope = ctx.plugin(plugin)
+  await scope
+  await registered
   assert.equal(contribution.descriptors[0].id, 'dsh-workbuddy-manager#workbuddy/manage')
   assert.equal(registration.options.id, 'workbuddy-manager')
   assert.equal(registration.options.label(), 'WorkBuddy')
-  assert.equal(registration.options.inject().remote, ctx.remote)
   assert.equal(typeof registration.component, 'function')
-  await dispose()
+  let missingInjection
+  const withoutInjection = ctx.plugin({
+    inject: ['remote'],
+    apply(context) {
+      try { void context.remote.workbuddy } catch (error) { missingInjection = error }
+    },
+  })
+  await withoutInjection
+  assert.match(missingInjection?.message ?? '', /cannot get property "remote\.workbuddy" without inject/)
+  await withoutInjection.dispose()
+  const remote = registration.options.inject().remote
+  assert.deepEqual(await remote.workbuddy.manage({ action: 'health' }), { action: 'health' })
+  await scope.dispose()
+  assert.equal(withdrawn, true)
   assert.equal(unmounted, true)
 })
 

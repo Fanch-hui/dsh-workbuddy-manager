@@ -27,14 +27,24 @@ test('桌面宿主真实合成、注册模型并发出 Responses 请求', { skip
     requests.push({ path: req.url, auth: req.headers.authorization, body: JSON.parse(Buffer.concat(parts).toString()) })
     res.writeHead(200, { 'content-type': 'text/event-stream' })
     const response = { id: 'resp_test', object: 'response', created_at: 1, status: 'completed', model: 'glm-5.2', output: [], usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } }
-    for (const event of [
-      { type: 'response.created', response: { ...response, status: 'in_progress' } },
+    const call = { id: 'fc_test', type: 'function_call', call_id: 'call_test', name: 'read_file', arguments: '{"path":"README.md"}' }
+    const output = requests.length === 1 ? [
       { type: 'response.output_item.added', output_index: 0, item: { id: 'msg_test', type: 'message', role: 'assistant', status: 'in_progress', content: [] } },
       { type: 'response.content_part.added', item_id: 'msg_test', output_index: 0, content_index: 0, part: { type: 'output_text', text: '', annotations: [] } },
       { type: 'response.output_text.delta', item_id: 'msg_test', output_index: 0, content_index: 0, delta: '你好' },
       { type: 'response.output_text.done', item_id: 'msg_test', output_index: 0, content_index: 0, text: '你好' },
-      { type: 'response.completed', response },
-    ]) res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+    ] : [
+      { type: 'response.output_item.added', output_index: 0, item: { ...call, arguments: '' } },
+      { type: 'response.function_call_arguments.delta', output_index: 0, item_id: call.id, delta: call.arguments },
+      { type: 'response.function_call_arguments.done', output_index: 0, item_id: call.id, arguments: call.arguments },
+      { type: 'response.output_item.done', output_index: 0, item: call },
+    ]
+    const events = [
+      { type: 'response.created', response: { ...response, status: 'in_progress' } },
+      ...output,
+      { type: 'response.completed', response: { ...response, output: requests.length === 1 ? [] : [call] } },
+    ]
+    for (const event of events) res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
     res.end('data: [DONE]\n\n')
   })
   await new Promise(ok => server.listen(0, '127.0.0.1', ok))
@@ -80,4 +90,17 @@ test('桌面宿主真实合成、注册模型并发出 Responses 请求', { skip
   assert.equal(requests[0].body.stream, true)
   assert.equal('max_output_tokens' in requests[0].body, false)
   assert.ok(JSON.stringify(chunks).includes('你好'))
+
+  const toolChunks = []
+  for await (const chunk of registered.adapter.stream({
+    provider: 'workbuddy-manager', model: route.models[0].id,
+    messages: [{ role: 'user', content: [{ type: 'text', text: '读取文件' }] }],
+    tools: [{ name: 'read_file', description: 'Read a file', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } }],
+  })) toolChunks.push(chunk)
+  assert.equal(requests.length, 2)
+  assert.equal(requests[1].body.tools[0].name, 'read_file')
+  assert.equal(requests[1].body.tools[0].type, 'function')
+  const toolCall = toolChunks.find(chunk => chunk.type === 'block-end' && chunk.block?.type === 'tool-call')
+  assert.equal(toolCall?.block.name, 'read_file')
+  assert.deepEqual(JSON.parse(toolCall.block.arguments), { path: 'README.md' })
 })

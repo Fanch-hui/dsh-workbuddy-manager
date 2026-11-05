@@ -51,7 +51,7 @@ export function validatePackage(root = ROOT) {
   expect(provider?.api === 'openai-responses', '协议为 openai-responses')
   expect(provider?.apiKeyEnv === 'WORKBUDDY_MANAGER_API_KEY', '网关密钥走 DSH 凭据引用')
   expect(typeof provider?.baseURL === 'string' && /\/v1\/?$/.test(provider.baseURL), 'baseURL 指向网关 /v1')
-  expect(provider?.compat?.supportsMaxOutputTokens === false, '省略网关未声明的 max_output_tokens')
+  expect(provider?.compat?.supportsMaxOutputTokens === false, '默认省略 max_output_tokens')
   const models = provider?.models
   expect(Array.isArray(models) && models.length > 0 && models.every(m => typeof m?.id === 'string'), '模型目录非空且每项有 id')
   expect(Array.isArray(models) && new Set(models.map(m => m.id)).size === models.length, '模型 id 不重复')

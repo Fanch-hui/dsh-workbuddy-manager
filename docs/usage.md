@@ -101,7 +101,7 @@ baseURL: https://wb.example.com/v1
 
 **协议**：默认 `openai-responses`。上游文档明确「只发 `openai-responses` 协议的客户端（如 DeepSeek Harness 的自定义提供方）……需要单独建一个提供方」，因此不要用 `openai-completions` 的提供方复用它。若确实要改用 chat/completions，把 `api` 改为 `openai-completions`，并**删除** `compat.supportsMaxOutputTokens`（该字段只对 Responses 协议有效），必要时加 `compat.maxTokensField: max_tokens`；注意上游未文档化 chat/completions 侧的 tool calling 支持情况。
 
-**兼容开关**：`compat.supportsMaxOutputTokens: false` 让 `llm-pi-ai` 省略 `max_output_tokens`，因为上游未声明接受该字段。若你的网关确认支持，可改为 `true`。
+**兼容开关**：本 bundle 默认设置 `compat.supportsMaxOutputTokens: false`，DSH 不会向网关发送输出长度上限。WorkBuddy Manager 2.11.10 的 Responses 接口[支持该字段](https://github.com/ithtelab/workbuddy-manager/blob/v2.11.10/server/routers/responses.py#L881-L882)；如需让 DSH 传递输出长度上限，可在实际生效的 provider 配置中将其设为 `true`。
 
 **其它**：`defaultContextWindow` / `defaultMaxTokens` 是未描述模型的容量回退；`retryPolicy` 控制 provider 自有重试（默认 normal、5 次，本插件设为 2 次，避免账号池被重复扣费）。
 
@@ -160,7 +160,7 @@ dsh-workbuddy models --json --url https://wb.example.com --timeout 20000
 | `INVALID_CREDENTIAL` / HTTP 401 | 密钥错误、被停用或版本不匹配；在面板核对密钥与 `/v1/models` 的返回 |
 | 模型选择器里没有 WorkBuddy Manager | `--dump-config` 确认合成后的 `llm-pi-ai` 行含 `workbuddy-manager`；若你的 profile/home 层覆盖了该行，把 workbuddy-manager 的 provider 块并入那一层 |
 | `/v1/models` 列表为空 | 密钥的模型白名单/版本限制；国内版与国际版（`global:`）互不通用 |
-| HTTP 400 且请求体含 `max_output_tokens` | 保留 `compat.supportsMaxOutputTokens: false` |
+| 输出长度设置未生效 | 检查实际生效的 provider 配置是否设为 `compat.supportsMaxOutputTokens: false`；该设置会省略输出上限 |
 | `TRANSPORT` / 连接超时 | 服务未启动、端口不对或反代拦截；用 `dsh-workbuddy doctor` 定位，公网请改用 HTTPS |
 | 模型目录与实际不符 | 以面板「设置 → 可用模型」为准，编辑 `cordis.patch.yml` 的 `models`；也可用 `dsh-workbuddy models --json` 对照 |
 

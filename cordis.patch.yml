@@ -23,8 +23,9 @@
         apiKeyEnv: WORKBUDDY_MANAGER_API_KEY
         api: openai-responses
         baseURL: http://127.0.0.1:7864/v1
-        # The gateway's /v1/responses is OpenAI-Responses compatible but
-        # does not document accepting max_output_tokens; withhold that field.
+        # Keep output-limit transmission disabled in this bundle by default.
+        # WorkBuddy Manager 2.11.10 supports max_output_tokens; set this to
+        # true if you need DSH's output limit to be sent to that version.
         compat:
           supportsMaxOutputTokens: false
         defaultContextWindow: 131072

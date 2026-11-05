@@ -198,6 +198,7 @@ test('桌面宿主同步真实模型发现并驱动内置本地网关', { skip: 
       describe: async () => ok({ writable: true, namespaces: [{ ns: 'llm-pi-ai', value: { providers: structuredClone(providers) }, revision }] }),
       mutate: async (ns, operations, expected) => {
         await settings.mutate(ns, operations, expected)
+        if (callbacks['internal/config']) callbacks['internal/config'](ctx.fiber, () => ({ providers }))
         resolved = Config({ providers }).providers.get()
         callbacks['loader/volatile-update']()
         return ok({ ns: 'llm-pi-ai', value: { providers }, revision: ++revision })

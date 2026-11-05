@@ -10,9 +10,9 @@ const css = `
 .workbuddy-panel .wb-muted{color:var(--dsw-alias-label-secondary,#686868);font-size:13px;line-height:20px}
 .workbuddy-panel .wb-card{border:1px solid var(--dsw-alias-settings-card-stroke,#dedede);background:var(--dsw-alias-settings-card-fill,transparent);border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:14px}
 .workbuddy-panel .wb-status{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
-.workbuddy-panel .wb-status strong{font-size:14px}.workbuddy-panel form,.workbuddy-panel label{display:flex;flex-direction:column;gap:7px}
+.workbuddy-panel .wb-status strong{font-size:14px}.workbuddy-panel form,.workbuddy-panel label{display:flex;flex-direction:column;gap:7px}.workbuddy-panel label.wb-check{flex-direction:row;align-items:center;gap:6px;cursor:pointer}
 .workbuddy-panel form{gap:14px}.workbuddy-panel label{font-size:13px;font-weight:500}
-.workbuddy-panel input,.workbuddy-panel select{box-sizing:border-box;width:100%;padding:9px 10px;border:1px solid var(--dsw-alias-border-l3,#bbb);border-radius:7px;color:inherit;background:var(--dsw-alias-settings-card-fill,transparent);font:inherit}
+.workbuddy-panel input:not([type=checkbox]),.workbuddy-panel select{box-sizing:border-box;width:100%;padding:9px 10px;border:1px solid var(--dsw-alias-border-l3,#bbb);border-radius:7px;color:inherit;background:var(--dsw-alias-settings-card-fill,transparent);font:inherit}.workbuddy-panel input[type=checkbox]{width:15px;height:15px;margin:0;cursor:pointer}
 .workbuddy-panel input:focus-visible,.workbuddy-panel select:focus-visible,.workbuddy-panel button:focus-visible,.workbuddy-panel a:focus-visible{outline:2px solid var(--dsw-alias-state-info-primary,#2673d9);outline-offset:2px}
 .workbuddy-panel .wb-actions{display:flex;gap:8px;flex-wrap:wrap}.workbuddy-panel button,.workbuddy-panel a{border-radius:7px;font:inherit;font-size:13px;cursor:pointer;padding:8px 12px}
 .workbuddy-panel button{border:1px solid var(--dsw-alias-border-l3,#bbb);background:transparent;color:inherit}.workbuddy-panel button[type=submit]{background:var(--dsw-alias-state-info-primary,#276cdc);border-color:transparent;color:#fff}
@@ -85,20 +85,22 @@ export function WorkbuddyPanel({ remote }: Props) {
 
   useEffect(() => { installStyles(); void load() }, [load])
 
-  const autoConnect = useCallback(async (active: () => boolean) => {
-    if (!active()) return
+  const autoConnect = useCallback(async (active: () => boolean): Promise<boolean> => {
+    if (!active()) return false
     setBusy(true); setFailure(''); setMessage(''); setStatus('正在启动本地网关并同步模型…')
     try {
       const count = await connectBridge(remote, active)
-      if (count === undefined || !active()) return
+      if (count === undefined || !active()) return false
       const updated = await loadConnection(remote, BRIDGE_PROVIDER)
-      if (!active()) return
+      if (!active()) return false
       setConnection(updated)
       setAddress(displayAddress(updated.url))
       setStatus(`已连接本地网关 · 已同步 ${count} 个模型`)
       setMessage('宿主账号池与本地网关已就绪，现在可在对话中选择 WorkBuddy 模型。')
+      return true
     } catch (error) {
       if (active()) { setStatus('本地网关连接未完成'); setFailure(safeMessage(error, '')) }
+      return false
     } finally { setBusy(false) }
   }, [remote])
 

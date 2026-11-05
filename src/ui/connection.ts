@@ -171,15 +171,18 @@ function newProvider(fields: Dictionary): Dictionary {
 }
 
 /** Bind a separately stored key without changing any other credential reference. */
-export async function attachCredential(remote: Remote, connection: Connection, address: string, ref: string): Promise<Connection> {
+export async function attachCredential(remote: Remote, connection: Connection, address: string, ref: string, seedModels?: Model[]): Promise<Connection> {
   const baseURL = normalizeURL(address)
   if (!connection.providerId) throw new Error('请先选择已有的 WorkBuddy 提供方。')
   if (!connection.writable) throw new Error('当前 DSH 配置不可写。')
   const api = apiOf(connection.providerId, connection.api)
+  const hadModels = connection.models.length > 0 || Boolean(seedModels?.length)
+  const initialModels: Model[] = seedModels?.length ? seedModels : (connection.models.length > 0 ? connection.models : [{ id: 'glm-5.3' }])
   const operations: Array<{ op: 'set'; path: string[]; value: unknown }> = connection.existing
     ? [
         { op: 'set', path: ['providers', connection.providerId, 'apiKeyEnv'], value: ref },
         { op: 'set', path: ['providers', connection.providerId, 'baseURL'], value: baseURL },
+        ...(connection.models.length === 0 ? [{ op: 'set' as const, path: ['providers', connection.providerId, 'models'], value: initialModels }] : []),
         ...(connection.providerId === BRIDGE_PROVIDER
           ? [
               { op: 'set' as const, path: ['providers', connection.providerId, 'api'], value: api },
@@ -197,12 +200,13 @@ export async function attachCredential(remote: Remote, connection: Connection, a
           baseURL,
           api,
           apiKeyEnv: ref,
-          models: [],
+          models: initialModels,
         }),
       }]
   const updated = await remote.settings.mutate(NAMESPACE, operations, connection.revision)
   if (!updated.ok) throw new Error(updated.error.code === 'settings/conflict' ? '模型配置已被修改，请重新载入后再试。' : updated.error.message)
-  return loadConnection(remote, connection.providerId)
+  const loaded = await loadConnection(remote, connection.providerId)
+  return hadModels ? loaded : { ...loaded, models: [] }
 }
 
 export function newCredentialRef(): string {
@@ -223,11 +227,11 @@ export async function sync(remote: Remote, connection: Connection, address: stri
       baseURL,
       api,
       apiKeyEnv: current.keyRef,
-      models: [],
+      models: [{ id: 'glm-5.3' }],
     })
     const restored = await remote.settings.mutate(NAMESPACE, [{ op: 'set', path: ['providers', current.providerId], value }], current.revision)
     if (!restored.ok) throw new Error(restored.error.code === 'settings/conflict' ? '模型配置已被修改，请重新载入后再试。' : restored.error.message)
-    current = await loadConnection(remote, current.providerId)
+    current = { ...(await loadConnection(remote, current.providerId)), models: [] }
   }
   let discovered: Model[]
   try { discovered = await discover(remote, current, baseURL, key) }
@@ -241,7 +245,9 @@ export async function sync(remote: Remote, connection: Connection, address: stri
     const status = result(await remote.credentials.describe([keyRef]))[keyRef]
     if (!status?.writable || status.configured) throw new Error('新凭据引用不可写或已被占用。')
   }
-  const models = mergeModels(current.models, discovered)
+  const merged = mergeModels(current.models, discovered)
+  const discoveredIds = new Set(discovered.map(m => m.id))
+  const models = current.providerId === BRIDGE_PROVIDER ? merged.filter(m => discoveredIds.has(m.id)) : merged
   const fields: Dictionary = { baseURL, api, apiKeyEnv: keyRef, models }
   const operations: Array<{ op: 'set'; path: string[]; value: unknown }> = current.existing
     ? Object.entries(fields).map(([field, value]) => ({ op: 'set', path: ['providers', current.providerId, field], value }))

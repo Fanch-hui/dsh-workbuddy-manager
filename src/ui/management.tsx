@@ -37,7 +37,7 @@ interface Props {
   writable: boolean
   disabled: boolean
   onBusyChange: (busy: boolean) => void
-  onConnect: (active: () => boolean) => Promise<void>
+  onConnect: (active: () => boolean) => Promise<boolean>
 }
 
 export function accountStatus(account: Account, poolAvailable: boolean): string {
@@ -124,8 +124,8 @@ export function Management({ remote, writable, disabled, onBusyChange, onConnect
           finished = true
           setQrStatus('账号授权成功，正在同步模型…')
           await refresh()
-          if (!cancelled) await onConnect(() => !cancelled)
-          if (!cancelled) { setAuthorization(undefined); setQrStatus(''); setMessage('账号已加入宿主账号池并完成模型同步。') }
+          const synced = !cancelled ? await onConnect(() => !cancelled) : false
+          if (!cancelled) { setAuthorization(undefined); setQrStatus(''); setMessage(synced ? '账号已加入宿主账号池并完成模型同步。' : '账号已加入宿主账号池。') }
           return
         }
         if (result.status === 'expired' || result.status === 'invalid') {
@@ -173,8 +173,8 @@ export function Management({ remote, writable, disabled, onBusyChange, onConnect
   const importDesktop = () => run(async () => {
     await call({ action: 'authDesktop', realm })
     await refresh()
-    await onConnect(() => true)
-    setMessage('已导入本机 WorkBuddy 桌面端登录并完成模型同步。')
+    const synced = await onConnect(() => true)
+    if (synced) setMessage('已导入本机 WorkBuddy 桌面端登录并完成模型同步。')
   })
 
   const importApiKey = () => run(async () => {
@@ -183,8 +183,8 @@ export function Management({ remote, writable, disabled, onBusyChange, onConnect
     await call({ action: 'authKey', realm, key: raw, nickname: apiKeyNote.trim() || undefined })
     setApiKeyInput(''); setApiKeyNote('')
     await refresh()
-    await onConnect(() => true)
-    setMessage('已添加 WorkBuddy API Key 账号并完成模型同步。')
+    const synced = await onConnect(() => true)
+    if (synced) setMessage('已添加 WorkBuddy API Key 账号并完成模型同步。')
   })
 
   const copyAuthorization = async () => {
@@ -232,13 +232,16 @@ export function Management({ remote, writable, disabled, onBusyChange, onConnect
   const toggleGatewayOption = (field: 'freeOnly' | 'hideDsh', value: boolean) => run(async () => {
     await call({ action: 'gatewayOptions', [field]: value })
     await refresh()
-    if (field === 'freeOnly' && writable) await onConnect(() => true)
+    if (field === 'freeOnly' && writable) {
+      const synced = await onConnect(() => true)
+      if (!synced) return
+    }
     setMessage('本地网关策略已更新。')
   })
 
   const syncPoolModels = () => run(async () => {
-    await onConnect(() => true)
-    setMessage('本地网关已连接并同步模型到 DSH。')
+    const synced = await onConnect(() => true)
+    if (synced) setMessage('本地网关已连接并同步模型到 DSH。')
   })
 
   const usableAccounts = overview?.accounts.filter(account => !account.disabled && !account.blocked && !account.expired && account.inPool).length ?? 0
@@ -265,11 +268,11 @@ export function Management({ remote, writable, disabled, onBusyChange, onConnect
         </div>
       </div>
       {overview?.options && <div className="wb-actions" style={{ marginBottom: '8px' }}>
-        <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+        <label className="wb-check">
           <input type="checkbox" checked={overview.options.freeOnly} disabled={blocked} onChange={e => void toggleGatewayOption('freeOnly', e.target.checked)} />
           仅免费模型 (Free models only)
         </label>
-        <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+        <label className="wb-check">
           <input type="checkbox" checked={overview.options.hideDsh} disabled={blocked} onChange={e => void toggleGatewayOption('hideDsh', e.target.checked)} />
           隐去 DSH 标识 (Hide DSH name)
         </label>

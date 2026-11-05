@@ -148,7 +148,7 @@ export class ManagerRemote extends TypertRemoteService {
     }
   }
 
-  private async issueBridge(): Promise<{ url: string; ref: string }> {
+  private async issueBridge(): Promise<{ url: string; ref: string; models: Array<Record<string, unknown>> }> {
     const credentials = this.ctx.get('credentials' as never) as unknown as CredentialStoreLike | undefined
     if (!credentials?.describe || !credentials.set) fail('DSH 凭据存储不可用。')
     const ref = BRIDGE_CREDENTIAL_REF
@@ -161,13 +161,26 @@ export class ManagerRemote extends TypertRemoteService {
     }
     if (!writable) fail('DSH 凭据存储不可写。')
     const url = await this.ensureGateway()
+    const discovered = await this.gateway.discoverModels()
+    if (discovered.length === 0) {
+      const opts = await this.pool.getGatewayOptions()
+      if (opts.freeOnly) fail('当前账号池（如国际版 workbuddy.ai）没有 0 积分免费模型，请取消勾选“仅免费模型”后再同步。')
+      fail('当前账号池没有可用模型，请检查账号状态。')
+    }
     try {
       await credentials.set(ref, this.gateway.token)
     } catch {
       fail('无法保存本地网关临时密钥。')
     }
     await this.pool.saveGatewayMeta(this.gateway.listeningPort, ref)
-    return { url, ref }
+    const models = discovered.map(m => ({
+      id: m.id,
+      ...(m.name ? { name: m.name } : {}),
+      ...(m.context ? { contextWindow: m.context } : {}),
+      ...(m.output ? { maxTokens: m.output } : {}),
+      input: m.images === false ? ['text'] : ['text', 'image'],
+    }))
+    return { url, ref, models }
   }
 
   private async authStart(realm: Realm): Promise<unknown> {

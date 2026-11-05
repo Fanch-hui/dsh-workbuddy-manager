@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import QRCode from 'qrcode'
 import type { ManagerRequest } from '../manager/contract.js'
 import { newCredentialRef, safeMessage, type Remote } from './connection.js'
@@ -29,6 +29,11 @@ export function keyScope(realm: string): string {
   return realm ? '版本限制未知' : '版本不限'
 }
 
+export async function copyLoginLink(url: string, clipboard: Pick<Clipboard, 'writeText'> | undefined): Promise<boolean> {
+  if (!clipboard) return false
+  try { await clipboard.writeText(url); return true } catch { return false }
+}
+
 function usage(value: number | null, quota: number | null, unit: string): string | undefined {
   if (value === null && quota === null) return undefined
   const used = value === null ? '未知' : value.toLocaleString()
@@ -49,8 +54,11 @@ export function Management({ remote, address, writable, disabled, onBusyChange, 
   const [editingName, setEditingName] = useState('')
   const [realm, setRealm] = useState<'cn' | 'global'>('cn')
   const [region, setRegion] = useState('')
-  const [qr, setQr] = useState('')
+  const [authorization, setAuthorization] = useState<{ url: string; qr: string }>()
+  const authorizationRef = useRef(authorization)
+  authorizationRef.current = authorization
   const [qrStatus, setQrStatus] = useState('')
+  const [copyStatus, setCopyStatus] = useState('')
   const [busy, setBusy] = useState(false)
   const [restoring, setRestoring] = useState(true)
   const blocked = busy || disabled || restoring
@@ -71,7 +79,7 @@ export function Management({ remote, address, writable, disabled, onBusyChange, 
     let active = true
     let checked = false
     let restoredRole = ''
-    setRestoring(true); setOnline('unknown'); setLoggedIn(false); setRole(''); setOverview(undefined); setQr(''); setQrStatus(''); setFailure(''); setMessage('')
+    setRestoring(true); setOnline('unknown'); setLoggedIn(false); setRole(''); setOverview(undefined); setAuthorization(undefined); setQrStatus(''); setFailure(''); setMessage('')
     const timer = setTimeout(() => {
       void (async () => {
         try {
@@ -96,33 +104,53 @@ export function Management({ remote, address, writable, disabled, onBusyChange, 
   }, [address, call, onConnect])
 
   useEffect(() => {
-    if (!qr) return
+    if (!authorization) return
     let cancelled = false
+    let polling = false
+    let finished = false
     let timer: ReturnType<typeof setTimeout>
     const poll = async () => {
+      if (cancelled || polling || finished) return
+      polling = true
       try {
         const result = await call({ action: 'authPoll', address }) as { status: string }
         if (cancelled) return
         if (result.status === 'success') {
+          finished = true
           setQrStatus('账号授权成功，正在连接模型…')
           await refresh()
           if (!cancelled) await onConnect(address, () => !cancelled)
-          if (!cancelled) { setQr(''); setQrStatus(''); setMessage('账号授权成功。') }
+          if (!cancelled) { setAuthorization(undefined); setQrStatus(''); setMessage('账号授权成功。') }
           return
         }
         if (result.status === 'expired' || result.status === 'invalid') {
-          setQr(''); setQrStatus(''); setFailure('授权二维码已失效，请重新生成。')
+          finished = true
+          setAuthorization(undefined); setQrStatus(''); setFailure('授权已失效，请重新获取登录链接。')
           return
         }
-        setQrStatus(result.status === 'scanned' ? '已扫码，请在手机上确认。' : '等待扫码与确认…')
+        setQrStatus(result.status === 'scanned' ? '已打开授权，请完成确认。' : '等待扫码或打开登录链接并确认…')
       } catch (error) {
-        if (!cancelled) setFailure(safeMessage(error, ''))
-      }
-      if (!cancelled) timer = setTimeout(() => void poll(), 3000)
+        if (!cancelled) {
+          if (finished) { setAuthorization(undefined); setQrStatus(''); setMessage('账号授权成功。') }
+          setFailure(safeMessage(error, ''))
+        }
+      } finally { polling = false }
+      if (!cancelled && !finished) timer = setTimeout(() => void poll(), 3000)
+    }
+    const wake = () => {
+      if (cancelled || polling || finished || document.hidden) return
+      clearTimeout(timer)
+      void poll()
     }
     timer = setTimeout(() => void poll(), 3000)
-    return () => { cancelled = true; clearTimeout(timer) }
-  }, [address, call, qr, refresh, onConnect])
+    window.addEventListener('focus', wake)
+    document.addEventListener('visibilitychange', wake)
+    return () => {
+      cancelled = true; clearTimeout(timer)
+      window.removeEventListener('focus', wake)
+      document.removeEventListener('visibilitychange', wake)
+    }
+  }, [address, call, authorization, refresh, onConnect])
 
   const run = async (operation: () => Promise<void>, secret = '') => {
     setBusy(true); onBusyChange(true); setFailure(''); setMessage('')
@@ -156,14 +184,25 @@ export function Management({ remote, address, writable, disabled, onBusyChange, 
 
   const logout = () => run(async () => {
     await call({ action: 'logout', address })
-    setLoggedIn(false); setRole(''); setOverview(undefined); setQr(''); setMessage('已退出管理会话。')
+    setLoggedIn(false); setRole(''); setOverview(undefined); setAuthorization(undefined); setMessage('已退出管理会话。')
   })
 
   const startAuth = () => run(async () => {
+    setAuthorization(undefined); setCopyStatus(''); setQrStatus('')
     const result = await call({ action: 'authStart', address, realm, region }) as { authUrl: string }
-    setQr(await QRCode.toDataURL(result.authUrl, { width: 200, margin: 2 }))
-    setQrStatus('等待扫码与确认…')
+    let qr = ''
+    try { qr = await QRCode.toDataURL(result.authUrl, { width: 200, margin: 2 }) }
+    catch { setFailure('二维码生成失败，请使用登录链接。') }
+    setAuthorization({ url: result.authUrl, qr })
+    setQrStatus('等待扫码或打开登录链接并确认…')
   })
+
+  const copyAuthorization = async () => {
+    if (!authorization) return
+    const copied = await copyLoginLink(authorization.url, navigator.clipboard)
+    if (authorizationRef.current !== authorization) return
+    setCopyStatus(copied ? '登录链接已复制。' : '无法自动复制，请选中上方链接手动复制。')
+  }
 
   const createKey = (event: FormEvent) => {
     event.preventDefault()
@@ -239,10 +278,16 @@ export function Management({ remote, address, writable, disabled, onBusyChange, 
           {role === 'admin' && overview.manageable && <button type="button" disabled={blocked} onClick={() => setAccount(account)}>{account.disabled || account.blocked ? '启用' : '停用'}</button>}
         </li>)}</ul>}
         {role === 'admin' && overview.manageable && <details className="wb-details"><summary>添加账号</summary><div className="wb-detail-body">
-          <label htmlFor="workbuddy-realm">账号版本<select id="workbuddy-realm" value={realm} disabled={blocked} onChange={event => setRealm(event.target.value as 'cn' | 'global')}><option value="cn">国内版</option><option value="global">国际版</option></select></label>
-          {realm === 'global' && <label htmlFor="workbuddy-region">国际版地区代码<input id="workbuddy-region" value={region} disabled={blocked} onChange={event => setRegion(event.target.value)} placeholder="例如 HK" /></label>}
-          <div className="wb-actions"><button type="button" disabled={blocked} onClick={() => void startAuth()}>扫码添加账号</button></div>
-          {qr && <div><img src={qr} width="200" height="200" alt="WorkBuddy 账号授权二维码" /><p className="wb-muted" role="status">{qrStatus}</p><button type="button" onClick={() => setQr('')}>关闭二维码</button></div>}
+          <label htmlFor="workbuddy-realm">账号版本<select id="workbuddy-realm" value={realm} disabled={blocked} onChange={event => { setRealm(event.target.value as 'cn' | 'global'); setAuthorization(undefined); setCopyStatus('') }}><option value="cn">国内版</option><option value="global">国际版</option></select></label>
+          {realm === 'global' && <label htmlFor="workbuddy-region">国际版地区代码<input id="workbuddy-region" value={region} disabled={blocked} onChange={event => { setRegion(event.target.value); setAuthorization(undefined); setCopyStatus('') }} placeholder="例如 HK" /></label>}
+          <div className="wb-actions"><button type="button" disabled={blocked} onClick={() => void startAuth()}>获取登录链接或扫码</button></div>
+          {authorization && <div className="wb-detail-body">
+            {authorization.qr && <img src={authorization.qr} width="200" height="200" alt="WorkBuddy 账号授权二维码" />}
+            <label htmlFor="workbuddy-auth-url">登录链接<input id="workbuddy-auth-url" value={authorization.url} readOnly autoComplete="off" spellCheck={false} onFocus={event => event.currentTarget.select()} /></label>
+            <div className="wb-actions"><button type="button" onClick={() => void copyAuthorization()}>复制登录链接</button><a href={authorization.url} target="_blank" rel="noopener noreferrer">打开登录链接</a><button type="button" onClick={() => setAuthorization(undefined)}>关闭</button></div>
+            <p className="wb-muted" role="status">{qrStatus}</p>
+            {copyStatus && <p className="wb-muted" role="status">{copyStatus}</p>}
+          </div>}
         </div></details>}
       </section>
       <section className="wb-card" aria-labelledby="workbuddy-keys-title">

@@ -6,14 +6,14 @@
 
 - DSH `0.2.2-rc.1`；插件的 `engines.dsh` 为 `>=0.2.2-rc.1 <0.3.0`。DSH 宿主要求 Node ≥24.9。
 - 已部署并启动 [WorkBuddy Manager](https://github.com/ithtelab/workbuddy-manager) `2.11.10`；账号池直连使用本项目提供的桥接镜像，默认管理地址为 `http://127.0.0.1:7864`。
-- WorkBuddy Manager 管理员账号；可在插件内扫码添加账号。
+- WorkBuddy Manager 管理员账号；可在插件内扫码或通过登录链接添加账号。
 
 ## 桌面版安装
 
 1. 按下方说明构建并启用 WorkBuddy Manager 桥接镜像。
-2. 从仓库执行 `npm pack`，在 DSH 插件页面安装生成的 `dsh-workbuddy-manager-0.4.0.tgz` 并启用，然后完全退出并重启 DSH。
+2. 从仓库执行 `npm pack`，在 DSH 插件页面安装生成的 `dsh-workbuddy-manager-0.4.1.tgz` 并启用，然后完全退出并重启 DSH。
 3. 打开 **设置 → WorkBuddy**。本机填写 `http://127.0.0.1:7864`；远程服务使用 HTTPS。
-4. 使用管理用户名和密码登录。插件自动连接账号池并同步模型；尚无账号时，在账号管理中扫码添加。
+4. 使用管理用户名和密码登录。插件自动连接账号池并同步模型；需要添加账号时，在账号管理中获取登录链接，扫码、复制链接或打开链接完成授权。
 5. 在对话模型选择器选择 **WorkBuddy 账号池**下的模型。已有网关密钥仍可在设置中选择或输入。
 
 从 `0.1.0` 升级时，如果路由仅来自旧版 bundle，插件会识别已保存的默认凭据；点击**保存并同步模型**即可恢复连接。已有 WorkBuddy 提供方会读取并保留其模型和高级设置；有多个候选时先选择目标。其他提供方无需迁移。
@@ -50,7 +50,7 @@ docker compose -p "$PROJECT" -f "$COMPOSE_FILE" -f bridge/compose.yaml up -d --n
 
 ```sh
 npm pack
-dsh plugin --profile demo add ./dsh-workbuddy-manager-0.4.0.tgz
+dsh plugin --profile demo add ./dsh-workbuddy-manager-0.4.1.tgz
 # 发布后：dsh plugin --profile demo add dsh-workbuddy-manager
 ```
 

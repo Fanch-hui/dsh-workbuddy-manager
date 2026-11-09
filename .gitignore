@@ -4,3 +4,6 @@ lib/
 .DS_Store
 .workbuddy-ai/
 .workbuddy-runtime/
+AGENTS.md
+*-plan.md
+docs/*-plan.md
